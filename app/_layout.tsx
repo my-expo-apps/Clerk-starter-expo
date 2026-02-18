@@ -9,7 +9,7 @@ import { useEffect } from 'react';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/components/useColorScheme';
-import { clerkPublishableKey } from '@/config/clerk';
+import { getClerkPublishableKey } from '@/config/clerk';
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -53,7 +53,7 @@ function RootLayoutNav() {
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <ClerkProvider publishableKey={clerkPublishableKey} tokenCache={tokenCache}>
+      <ClerkProvider publishableKey={getClerkPublishableKey()} tokenCache={tokenCache}>
         <Stack>
           <Stack.Screen name="(home)" options={{ headerShown: false }} />
           <Stack.Screen name="(auth)" options={{ headerShown: false }} />
