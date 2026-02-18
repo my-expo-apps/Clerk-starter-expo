@@ -54,7 +54,7 @@ export async function validateSystemConnection(): Promise<SystemConnectionResult
 
       const data = invoke.data as
         | { success: true; session: { access_token: string; refresh_token: string } }
-        | { success: false; error: string };
+        | { success: false; error: string; code?: string };
 
       if ('success' in data && data.success && data.session?.access_token && data.session?.refresh_token) {
         const set = await supabase.auth.setSession({
@@ -76,7 +76,7 @@ export async function validateSystemConnection(): Promise<SystemConnectionResult
           supabase: supabaseConnected,
           clerk: clerkConnected,
           bridge: false,
-          error: 'success' in data ? data.error : 'Bridge failed',
+          error: 'success' in data ? `${data.code ?? 'bridge_failed'}: ${data.error}` : 'bridge_failed: Bridge failed',
         };
       }
     }
