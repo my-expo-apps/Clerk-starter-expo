@@ -39,30 +39,45 @@ export async function validateSystemConnection(): Promise<SystemConnectionResult
     clerkConnected = !!token;
 
     if (supabaseConnected && token) {
-      // Best-effort bridge validation:
-      // If you deploy a Supabase Edge Function named `clerk-jwt-verify`, it can validate the Clerk JWT
-      // and optionally return a Supabase session. Until then, we treat "bridge" as unauthorized.
       const invoke = await supabase.functions.invoke('clerk-jwt-verify', {
-        headers: { Authorization: `Bearer ${token}` },
+        body: { clerkToken: token },
       });
 
-      if (!invoke.error) {
-        const data = invoke.data as
-          | { ok?: boolean; supabase_access_token?: string; supabase_refresh_token?: string }
-          | null
-          | undefined;
+      if (invoke.error) {
+        return {
+          supabase: supabaseConnected,
+          clerk: clerkConnected,
+          bridge: false,
+          error: invoke.error.message,
+        };
+      }
 
-        if (data?.supabase_access_token && data?.supabase_refresh_token) {
-          const set = await supabase.auth.setSession({
-            access_token: data.supabase_access_token,
-            refresh_token: data.supabase_refresh_token,
-          });
-          bridgeAuthorized = !set.error;
-        } else {
-          bridgeAuthorized = data?.ok === true;
+      const data = invoke.data as
+        | { success: true; session: { access_token: string; refresh_token: string } }
+        | { success: false; error: string };
+
+      if ('success' in data && data.success && data.session?.access_token && data.session?.refresh_token) {
+        const set = await supabase.auth.setSession({
+          access_token: data.session.access_token,
+          refresh_token: data.session.refresh_token,
+        });
+        bridgeAuthorized = !set.error;
+        if (set.error) {
+          return {
+            supabase: supabaseConnected,
+            clerk: clerkConnected,
+            bridge: false,
+            error: set.error.message,
+          };
         }
       } else {
         bridgeAuthorized = false;
+        return {
+          supabase: supabaseConnected,
+          clerk: clerkConnected,
+          bridge: false,
+          error: 'success' in data ? data.error : 'Bridge failed',
+        };
       }
     }
 
@@ -71,9 +86,6 @@ export async function validateSystemConnection(): Promise<SystemConnectionResult
       clerk: clerkConnected,
       bridge: bridgeAuthorized,
       ...(supabaseConnected ? null : { error: projectsRes.error?.message || sessionRes.error?.message }),
-      ...(supabaseConnected && token && !bridgeAuthorized
-        ? { error: 'Bridge not authorized. Deploy clerk-jwt-verify edge function (or return Supabase session tokens).' }
-        : null),
     };
   } catch (e) {
     return { supabase: false, clerk: false, bridge: false, error: (e as Error).message };

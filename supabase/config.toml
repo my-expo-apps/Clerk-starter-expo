@@ -1,0 +1,3 @@
+[functions.clerk-jwt-verify]
+verify_jwt = false
+
