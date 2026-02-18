@@ -8,6 +8,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "validate": "node -r ts-node/register -e \"require('./scripts/validate-foundation.ts')\"",
+    "setup-project": "node -r ts-node/register -e \"require('./scripts/setup-project.ts')\"",
     "test": "vitest"
   },
   "dependencies": {

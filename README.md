@@ -219,6 +219,50 @@ Then open Android, iOS, or Web from Expo CLI.
 
 ---
 
+## Recommended Setup Flow (CLI First)
+
+Provisioning is recommended via CLI (repeatable + non-interactive) rather than from the app UI.
+
+### 1) Set provisioning env vars (local shell / CI)
+
+Required:
+
+- `SUPABASE_PROJECT_REF`
+- `SUPABASE_DB_PASSWORD`
+- `CLERK_JWT_ISSUER`
+- `CLERK_EXPECTED_AUDIENCE`
+
+Optional (used only to generate your local `.env` / `.env.generated`):
+
+- `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY`
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+
+### 2) Run provisioning script
+
+```bash
+npm run setup-project
+```
+
+This will:
+
+- verify Supabase CLI is installed
+- `supabase link` (non-interactive via env vars)
+- `supabase db push`
+- deploy edge functions:
+  - `clerk-jwt-verify`
+  - `bootstrap-system`
+  - `bootstrap-status`
+- generate a local `.env` (or `.env.generated` if `.env` already exists)
+
+### 3) Validate (optional)
+
+```bash
+npm run validate
+```
+
+---
+
 ## Advanced setup (Supabase-prep and beyond)
 
 > Follow these steps when moving to the production branch path.
