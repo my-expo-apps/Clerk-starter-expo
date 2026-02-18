@@ -1,53 +1,40 @@
-# Supabase-Prep — Secure SaaS Auth Foundation (Expo + Clerk + Supabase)
+# Secure Runtime Expo + Clerk + Supabase Foundation
 
-A clone-ready SaaS authentication foundation built on:
+A **production-oriented** Expo foundation for Clerk authentication + Supabase data isolation with a secure, clone-ready pattern:
+**runtime secrets** (no `.env` in the app), deterministic identity mapping, stateless JWT federation, and RLS-enforced multi-tenant isolation.
 
-- **Runtime secret isolation**
-- **Clerk authentication**
-- **Deterministic identity mapping (UUIDv5)**
-- **Stateless Custom JWT federation**
-- **RLS-enforced data isolation**
+## Key features
 
-This is **not** a demo starter.  
-It is a production-grade auth blueprint.
+- **Runtime secrets UI** (Expo SecureStore / web localStorage) — no secrets committed in code
+- **Clerk auth** with custom email/password UI (works in Expo Go + Web)
+- **Deterministic identity mapping** (UUIDv5) from Clerk user IDs
+- **Custom JWT federation**: Clerk JWT verified → Supabase JWT minted → `auth.uid()` works with RLS
+- **Auto bootstrap**: Edge function can install required DB structure via a permission-restricted RPC
+- **Health validation**: CLI script checks Edge + RPC + DB readiness
 
-## Quick Start
+## Quick start
 
 ### 1) Clone & install
 
 ```bash
 git clone <your-repo-url>
-cd supabase-prep
+cd clerk-expo-starter
 npm install
 ```
 
-### 2) Create Supabase project
+### 2) Supabase setup
 
-Create a new project at [Supabase](https://supabase.com).
+- Create a project in Supabase
+- Install Supabase CLI and login
+- Link the project (optional) and **push migrations**:
 
-Copy:
-- **Project URL**
-- **Anon public key**
+```bash
+supabase db push
+```
 
-Go to **Project Settings → API** and copy:
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `SUPABASE_JWT_SECRET`
+#### Edge Functions env vars (Supabase Dashboard)
 
-### 3) Create Clerk project
-
-Create a project at [Clerk](https://clerk.com).
-
-Copy:
-- **Publishable key**
-- **JWT issuer URL**
-
-In Clerk Dashboard → **JWT Templates**:
-- Ensure **audience** is defined (used as `CLERK_EXPECTED_AUDIENCE`)
-
-### 4) Configure Supabase Edge Function env
-
-Set these environment variables in Supabase (Dashboard → Project Settings → Functions → Environment variables):
+Set (Project Settings → Functions → Environment variables):
 
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
@@ -58,90 +45,59 @@ Set these environment variables in Supabase (Dashboard → Project Settings → 
 Optional:
 - `CLERK_JWKS_URL`
 
-### 5) Deploy Edge Function
+### 3) Clerk setup
 
-From project root (requires Supabase CLI):
+- Create a Clerk project
+- Enable **Native** application support
+- Copy the **Publishable key** (used in-app at runtime)
+- Create/verify a **JWT Template** with an **audience** matching `CLERK_EXPECTED_AUDIENCE`
+
+### 4) Deploy Edge Functions
 
 ```bash
 supabase functions deploy clerk-jwt-verify --no-verify-jwt
+supabase functions deploy bootstrap-system --no-verify-jwt
 ```
 
-For local development:
-
-```bash
-supabase functions serve clerk-jwt-verify --no-verify-jwt
-```
-
-### 6) Run the app
+### 5) Run the app
 
 ```bash
 npx expo start
 ```
 
-Open in Expo Go / simulator.
+In the app, open the **Setup** screen and enter runtime secrets:
 
-### 7) Configure runtime secrets (inside the app)
-
-Open **Supabase setup** screen.
-
-Enter:
 - Supabase URL
 - Supabase Anon key
 - Clerk Publishable key
 
-Click **Validate & Authorize** and ensure all status badges are green.
+Then click **Validate & Authorize**.
 
-### 8) Run RLS bootstrap
+## Validate foundation (CLI)
 
-In Supabase SQL Editor, run:
+Create a local `.env` for the validator only:
 
-```sql
--- file: supabase/bootstrap/rls_base.sql
+```bash
+cp .env.template .env
 ```
 
-This enables:
-- `auth.uid()`-based policies
-- Full CRUD isolation
-- `updated_at` triggers
-- `user_id` indexing
+Fill in **Supabase** values (do not commit `.env`), then run:
 
-## How it works
+```bash
+npm run validate
+```
 
-### Identity mapping
+Exit codes:
+- `0` when `bootstrap_status.ready === true`
+- `1` otherwise
 
-`supabaseUserId = UUIDv5(clerkUserId)`
+## Common errors
 
-Properties:
-- Deterministic
-- No duplication
-- Stateless
+- **`bootstrap_rpc_missing: run supabase db push`**
+  - Your DB migrations weren’t applied yet. Run `supabase db push` and retry validation.
 
-### Federation model
+## Security notes
 
-- Clerk JWT verified via JWKS
-- UUIDv5 derived
-- Supabase JWT minted (HS256)
-- `auth.uid()` resolves to deterministic UUID
-
-No magic links. No OTP. No email-based identity.
-
-## Security guarantees
-
-- No runtime secret leakage
-- Cryptographic JWT verification
-- Deterministic identity mapping
-- Stateless federation
-- RLS fully aligned with JWT
-- No email identity assumptions
-
-## Result
-
-- Expo Runtime
-- Clerk Auth
-- Secure Runtime Secrets
-- Deterministic Identity
-- Custom JWT Federation
-- RLS-Enforced Isolation
-
-**A production-ready SaaS security foundation.**
+- Do not commit real secrets (use `.env.template` only).
+- Edge bootstrap is permission-restricted: RPC execution is granted only to `service_role`.
 
