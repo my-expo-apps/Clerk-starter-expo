@@ -34,6 +34,8 @@ yarn-error.*
 .env*.local
 .env
 .env.*
+*.local
+!.env.template
 
 # typescript
 *.tsbuildinfo
@@ -41,3 +43,6 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Supabase local artifacts
+supabase/.temp/
