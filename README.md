@@ -263,6 +263,54 @@ npm run validate
 
 ---
 
+## CLI Modes
+
+### Normal
+
+```bash
+npm run setup-project
+```
+
+- **Exit 0** on success
+- **Exit 1** on any failure
+
+### Dry Run
+
+```bash
+npm run setup-project -- --dry-run
+```
+
+- Prints what would run
+- Does not execute commands
+- Does not generate `.env`
+- **Exit 0**
+
+### CI Mode
+
+```bash
+CI=true npm run setup-project
+```
+
+- Non-interactive
+- Fails fast on missing requirements / any step failure
+- Does **not** generate `.env`
+- **Exit 0** on success, **1** on failure
+
+### Health Check
+
+```bash
+npm run health-check
+```
+
+- Minimal output:
+  - Supabase Host: OK/FAIL
+  - Edge Function: OK/FAIL
+  - RPC: OK/FAIL
+  - System Ready: YES/NO
+- **Exit 0** if ready, **1** otherwise
+
+---
+
 ## Advanced setup (Supabase-prep and beyond)
 
 > Follow these steps when moving to the production branch path.

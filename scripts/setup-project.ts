@@ -5,6 +5,11 @@ import path from 'node:path';
 
 type Step = { name: string; ok: boolean; detail?: string };
 
+type Mode = {
+  dryRun: boolean;
+  ci: boolean;
+};
+
 function env(name: string): string | null {
   const v = process.env[name];
   return v && v.trim().length ? v.trim() : null;
@@ -16,7 +21,24 @@ function requireEnv(name: string): string {
   return v;
 }
 
-function run(cmd: string, args: string[], opts?: { cwd?: string; redactArgs?: boolean }) {
+function redact(text: string) {
+  // Never print secrets. Best-effort redaction for common env var values.
+  const secrets = [
+    env('SUPABASE_DB_PASSWORD'),
+    env('SUPABASE_ANON_KEY'),
+    env('SUPABASE_SERVICE_ROLE_KEY'),
+    env('SUPABASE_JWT_SECRET'),
+  ].filter(Boolean) as string[];
+
+  let out = text;
+  for (const s of secrets) {
+    if (!s) continue;
+    out = out.split(s).join('***');
+  }
+  return out;
+}
+
+function run(cmd: string, args: string[], opts?: { cwd?: string }) {
   const res = spawnSync(cmd, args, {
     cwd: opts?.cwd ?? process.cwd(),
     stdio: 'pipe',
@@ -26,8 +48,10 @@ function run(cmd: string, args: string[], opts?: { cwd?: string; redactArgs?: bo
 
   if (res.error) throw res.error;
   if (res.status !== 0) {
-    const out = (res.stdout ?? '') + (res.stderr ?? '');
-    throw new Error(`${cmd} failed (exit ${res.status}). ${out}`.trim());
+    // Keep output minimal; redact secrets just in case.
+    const out = redact(((res.stdout ?? '') + (res.stderr ?? '')).trim());
+    const msg = out ? `${cmd} failed (exit ${res.status}). ${out}` : `${cmd} failed (exit ${res.status}).`;
+    throw new Error(msg);
   }
   return (res.stdout ?? '').trim();
 }
@@ -51,11 +75,38 @@ function safeEnvLine(key: string, value: string) {
   return `${key}=${v}`;
 }
 
+function parseArgs(argv: string[]): Mode {
+  // argv is typically process.argv, but tolerate different invocation styles.
+  const dryRun = argv.includes('--dry-run');
+  const ci = env('CI') === 'true';
+  return { dryRun, ci };
+}
+
+function wouldRun(cmd: string, args: string[]) {
+  // Redact obvious sensitive flags (password value)
+  const redacted = args.map((a, i) => {
+    if (args[i - 1] === '--password') return '***';
+    return a;
+  });
+  return `Would run: ${cmd} ${redacted.join(' ')}`;
+}
+
 async function main() {
   const steps: Step[] = [];
   const push = (s: Step) => steps.push(s);
 
-  // Load .env.template? We intentionally only use process.env so users can run this in CI.
+  const mode = parseArgs(process.argv);
+
+  if (mode.dryRun) {
+    console.log('[DRY RUN]');
+    console.log('- ' + wouldRun('supabase', ['link', '--project-ref', env('SUPABASE_PROJECT_REF') ?? '<SUPABASE_PROJECT_REF>', '--password', '***']));
+    console.log('- ' + wouldRun('supabase', ['db', 'push']));
+    console.log('- Would deploy: clerk-jwt-verify');
+    console.log('- Would deploy: bootstrap-system');
+    console.log('- Would deploy: bootstrap-status');
+    console.log('- Would generate: .env (skipped in dry-run)');
+    process.exit(0);
+  }
 
   const supabase = hasCli('supabase', ['--version']);
   push({ name: 'Supabase CLI installed', ok: supabase.ok, detail: supabase.ok ? supabase.version : 'Install: https://supabase.com/docs/guides/cli' });
@@ -69,11 +120,35 @@ async function main() {
   });
   // Clerk CLI is optional for now; we validate issuer/audience via env.
 
-  const projectRef = requireEnv('SUPABASE_PROJECT_REF');
-  const dbPassword = requireEnv('SUPABASE_DB_PASSWORD');
+  let projectRef: string;
+  let dbPassword: string;
+  let clerkIssuer: string;
+  let clerkAudience: string;
 
-  const clerkIssuer = requireEnv('CLERK_JWT_ISSUER');
-  const clerkAudience = requireEnv('CLERK_EXPECTED_AUDIENCE');
+  try {
+    projectRef = requireEnv('SUPABASE_PROJECT_REF');
+  } catch {
+    push({ name: 'env: SUPABASE_PROJECT_REF', ok: false, detail: 'Missing SUPABASE_PROJECT_REF' });
+    return finish(steps, 1);
+  }
+  try {
+    dbPassword = requireEnv('SUPABASE_DB_PASSWORD');
+  } catch {
+    push({ name: 'env: SUPABASE_DB_PASSWORD', ok: false, detail: 'Missing SUPABASE_DB_PASSWORD' });
+    return finish(steps, 1);
+  }
+  try {
+    clerkIssuer = requireEnv('CLERK_JWT_ISSUER');
+  } catch {
+    push({ name: 'env: CLERK_JWT_ISSUER', ok: false, detail: 'Missing CLERK_JWT_ISSUER' });
+    return finish(steps, 1);
+  }
+  try {
+    clerkAudience = requireEnv('CLERK_EXPECTED_AUDIENCE');
+  } catch {
+    push({ name: 'env: CLERK_EXPECTED_AUDIENCE', ok: false, detail: 'Missing CLERK_EXPECTED_AUDIENCE' });
+    return finish(steps, 1);
+  }
 
   // Basic validation (no secrets printed)
   try {
@@ -118,6 +193,11 @@ async function main() {
   }
 
   // Generate .env (for local dev only; do not commit)
+  if (mode.ci) {
+    push({ name: 'generate .env', ok: true, detail: 'skipped (CI=true)' });
+    return finish(steps, 0);
+  }
+
   const repoRoot = process.cwd();
   const envPath = path.join(repoRoot, '.env');
   const already = fs.existsSync(envPath);

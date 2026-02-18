@@ -1,4 +1,8 @@
-import type { ValidationLogEntry } from '@/services/connection-validator';
+export type ValidationLogEntry = {
+  ts: number;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+};
 
 export type DiagnosticResult = {
   connection: boolean;
@@ -12,7 +16,7 @@ export type DiagnosticResult = {
     edgeClerkVerify: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'not_deployed' | 'http_error' | 'unknown' };
     edgeBootstrapSystem: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'not_deployed' | 'http_error' | 'unknown' };
     rpcStatus: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'not_deployed' | 'bootstrap_rpc_missing' | 'http_error' | 'unknown'; statusObj?: any };
-    supabaseJwt: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'http_error' | 'unknown' };
+    supabaseJwt: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'not_deployed' | 'http_error' | 'unknown' };
   };
 };
 
@@ -155,7 +159,7 @@ export async function runDiagnostics(params: {
         body: { clerkToken: params.clerkToken },
         onLog: params.onLog,
       })
-    : { ok: false, ms: 0, error: 'clerk_token_missing' as const, data: undefined };
+    : { ok: false, ms: 0, error: 'clerk_token_missing' as const, kind: 'unknown' as const, status: undefined, data: undefined };
 
   // RPC status (bootstrap_status) via Edge wrapper
   const rpcStatus = params.clerkToken
@@ -165,7 +169,14 @@ export async function runDiagnostics(params: {
         clerkToken: params.clerkToken,
         onLog: params.onLog,
       })
-    : { ok: false, ms: 0, error: 'clerk_token_missing' as const, status: undefined };
+    : {
+        ok: false,
+        ms: 0,
+        error: 'clerk_token_missing' as const,
+        kind: 'unknown' as const,
+        status: undefined,
+        statusObj: undefined,
+      };
 
   // Can we reach bootstrap-system without executing it? (use OPTIONS)
   const edgeBootstrapSystem = params.clerkToken
@@ -176,10 +187,16 @@ export async function runDiagnostics(params: {
         method: 'OPTIONS',
         onLog: params.onLog,
       })
-    : { ok: false, ms: 0, error: 'clerk_token_missing' as const, data: undefined };
+    : { ok: false, ms: 0, error: 'clerk_token_missing' as const, kind: 'unknown' as const, status: undefined, data: undefined };
 
   // Verify minted Supabase JWT actually works against Supabase Auth API
-  let supabaseJwt: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'http_error' | 'unknown' } = {
+  let supabaseJwt: {
+    ok: boolean;
+    ms: number;
+    status?: number;
+    error?: string;
+    kind?: 'ok' | 'timeout' | 'not_deployed' | 'http_error' | 'unknown';
+  } = {
     ok: false,
     ms: 0,
     error: 'bridge_not_attempted',
@@ -226,7 +243,7 @@ export async function runDiagnostics(params: {
       ? 'supabase_unreachable'
       : !params.clerkToken
         ? 'clerk_token_missing'
-        : !rpcInstalled && (rpcStatus.error === 'bootstrap_rpc_missing' || (rpcStatus as any)?.code === 'bootstrap_rpc_missing')
+        : !rpcInstalled && (rpcStatus.kind === 'bootstrap_rpc_missing' || rpcStatus.error === 'bootstrap_rpc_missing')
           ? 'bootstrap_rpc_missing'
           : undefined;
 

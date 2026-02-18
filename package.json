@@ -9,6 +9,7 @@
     "web": "expo start --web",
     "validate": "node -r ts-node/register -e \"require('./scripts/validate-foundation.ts')\"",
     "setup-project": "node -r ts-node/register -e \"require('./scripts/setup-project.ts')\"",
+    "health-check": "node -r ts-node/register -e \"require('./scripts/health-check.ts')\"",
     "test": "vitest"
   },
   "dependencies": {
