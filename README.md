@@ -311,6 +311,46 @@ npm run health-check
 
 ---
 
+## Environment Modes
+
+- **dev** → local development
+- **staging** → pre-production testing
+- **prod** → production deployment
+
+### CLI usage
+
+- **Setup provisioning for an environment** (default is `dev`):
+
+```bash
+npm run setup-project -- --env=staging
+```
+
+- **Dry run** (no commands executed, no env files written):
+
+```bash
+npm run setup-project -- --env=prod --dry-run
+```
+
+- **Health check** against a specific environment:
+
+```bash
+npm run health-check -- --env=prod
+```
+
+### Expo switching
+
+Set the environment at build/run time:
+
+```env
+EXPO_PUBLIC_ENV=dev
+```
+
+Your app can later read it via:
+
+- `process.env.EXPO_PUBLIC_ENV`
+
+---
+
 ## Advanced setup (Supabase-prep and beyond)
 
 > Follow these steps when moving to the production branch path.

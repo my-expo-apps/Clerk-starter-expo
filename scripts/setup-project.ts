@@ -5,10 +5,17 @@ import path from 'node:path';
 
 type Step = { name: string; ok: boolean; detail?: string };
 
+// Load via absolute path to avoid resolution edge-cases when invoked via `node -r ts-node/register -e ...`
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { environments } = require(path.join(process.cwd(), 'config', 'environments.ts'));
+
 type Mode = {
   dryRun: boolean;
   ci: boolean;
+  env: EnvironmentKey;
 };
+
+type EnvironmentKey = 'dev' | 'staging' | 'prod';
 
 function env(name: string): string | null {
   const v = process.env[name];
@@ -75,11 +82,37 @@ function safeEnvLine(key: string, value: string) {
   return `${key}=${v}`;
 }
 
+function userArgs(argv: string[]): string[] {
+  const sep = argv.lastIndexOf('--');
+  if (sep >= 0) return argv.slice(sep + 1);
+  // When invoked via `node -e "require(...)"`, argv looks like: [node, ...userArgs]
+  // When invoked via `node script.js`, argv looks like: [node, script, ...userArgs]
+  const start = argv[1]?.startsWith('--') ? 1 : 2;
+  return argv.slice(start);
+}
+
+function parseEnvArg(args: string[]): EnvironmentKey {
+  const raw = args.find((a) => a.startsWith('--env='))?.split('=')[1]?.trim();
+  if (!raw) return 'dev';
+  if (raw === 'dev' || raw === 'staging' || raw === 'prod') return raw;
+  throw new Error(`Invalid --env=${raw}. Expected dev|staging|prod.`);
+}
+
+function loadEnvFileIfPresent(envFile: string) {
+  const p = path.join(process.cwd(), envFile);
+  if (!fs.existsSync(p)) return false;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const dotenv = require('dotenv');
+  dotenv.config({ path: p, override: false });
+  return true;
+}
+
 function parseArgs(argv: string[]): Mode {
-  // argv is typically process.argv, but tolerate different invocation styles.
-  const dryRun = argv.includes('--dry-run');
+  const args = userArgs(argv);
+  const dryRun = args.includes('--dry-run');
   const ci = env('CI') === 'true';
-  return { dryRun, ci };
+  const envKey = parseEnvArg(args);
+  return { dryRun, ci, env: envKey };
 }
 
 function wouldRun(cmd: string, args: string[]) {
@@ -96,15 +129,26 @@ async function main() {
   const push = (s: Step) => steps.push(s);
 
   const mode = parseArgs(process.argv);
+  const envProfile = environments[mode.env];
+
+  // Load selected env file (if present) so provisioning can be per-environment.
+  // Never prints the file contents.
+  const loaded = loadEnvFileIfPresent(envProfile.envFile);
+  push({
+    name: `load env file: ${envProfile.envFile}`,
+    ok: true,
+    detail: loaded ? 'loaded' : 'not found (using process.env)',
+  });
 
   if (mode.dryRun) {
     console.log('[DRY RUN]');
+    console.log(`- Target env: ${mode.env} (${envProfile.envFile})`);
     console.log('- ' + wouldRun('supabase', ['link', '--project-ref', env('SUPABASE_PROJECT_REF') ?? '<SUPABASE_PROJECT_REF>', '--password', '***']));
     console.log('- ' + wouldRun('supabase', ['db', 'push']));
     console.log('- Would deploy: clerk-jwt-verify');
     console.log('- Would deploy: bootstrap-system');
     console.log('- Would deploy: bootstrap-status');
-    console.log('- Would generate: .env (skipped in dry-run)');
+    console.log(`- Would generate: ${envProfile.envFile} (skipped in dry-run)`);
     process.exit(0);
   }
 
@@ -194,14 +238,14 @@ async function main() {
 
   // Generate .env (for local dev only; do not commit)
   if (mode.ci) {
-    push({ name: 'generate .env', ok: true, detail: 'skipped (CI=true)' });
+    push({ name: `generate ${envProfile.envFile}`, ok: true, detail: 'skipped (CI=true)' });
     return finish(steps, 0);
   }
 
   const repoRoot = process.cwd();
-  const envPath = path.join(repoRoot, '.env');
+  const envPath = path.join(repoRoot, envProfile.envFile);
   const already = fs.existsSync(envPath);
-  const outPath = already ? path.join(repoRoot, '.env.generated') : envPath;
+  const outPath = already ? path.join(repoRoot, `${envProfile.envFile}.generated`) : envPath;
 
   const publishableKey = env('EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY') ?? 'pk_test_...';
   const supabaseUrl = env('SUPABASE_URL') ?? 'https://YOUR-PROJECT-REF.supabase.co';
@@ -223,7 +267,11 @@ async function main() {
 
   try {
     writeEnvFile(outPath, content);
-    push({ name: `generate ${path.basename(outPath)}`, ok: true, detail: already ? 'Existing .env detected; wrote .env.generated instead.' : undefined });
+    push({
+      name: `generate ${path.basename(outPath)}`,
+      ok: true,
+      detail: already ? `Existing ${envProfile.envFile} detected; wrote ${path.basename(outPath)} instead.` : undefined,
+    });
   } catch (e) {
     push({ name: 'generate .env', ok: false, detail: (e as Error).message });
     return finish(steps, 1);
