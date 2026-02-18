@@ -8,11 +8,11 @@ export type DiagnosticResult = {
   errorCode?: string;
   errorMessage?: string;
   checks: {
-    host: { ok: boolean; ms: number; error?: string };
-    edgeClerkVerify: { ok: boolean; ms: number; error?: string };
-    edgeBootstrapSystem: { ok: boolean; ms: number; error?: string };
-    rpcStatus: { ok: boolean; ms: number; error?: string; status?: any };
-    supabaseJwt: { ok: boolean; ms: number; error?: string };
+    host: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'not_deployed' | 'http_error' | 'unknown' };
+    edgeClerkVerify: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'not_deployed' | 'http_error' | 'unknown' };
+    edgeBootstrapSystem: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'not_deployed' | 'http_error' | 'unknown' };
+    rpcStatus: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'not_deployed' | 'bootstrap_rpc_missing' | 'http_error' | 'unknown'; statusObj?: any };
+    supabaseJwt: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'http_error' | 'unknown' };
   };
 };
 
@@ -61,6 +61,14 @@ function trimSlash(url: string) {
   return url.replace(/\/+$/, '');
 }
 
+function classify(res: { ok: boolean; status?: number; error?: string }) {
+  if (res.ok) return { kind: 'ok' as const };
+  if (res.error === 'timeout') return { kind: 'timeout' as const };
+  if (res.status === 404) return { kind: 'not_deployed' as const };
+  if (typeof res.status === 'number') return { kind: 'http_error' as const };
+  return { kind: 'unknown' as const };
+}
+
 export async function testHost(params: { supabaseUrl: string; onLog?: LogFn }) {
   const url = `${trimSlash(params.supabaseUrl)}/auth/v1/health`;
   log(params.onLog, 'info', 'Testing Supabase host…');
@@ -68,7 +76,9 @@ export async function testHost(params: { supabaseUrl: string; onLog?: LogFn }) {
   return {
     ok: res.ok,
     ms: res.ms,
+    status: res.ok ? res.status : res.status,
     error: res.ok ? undefined : res.error,
+    ...classify({ ok: res.ok, status: res.ok ? res.status : res.status, error: res.ok ? undefined : res.error }),
   };
 }
 
@@ -97,8 +107,10 @@ export async function testEdgeFunction(params: {
   return {
     ok,
     ms: res.ms,
+    status: res.ok ? res.status : res.status,
     error: ok ? undefined : res.ok ? JSON.stringify((res.data as any)?.error ?? res.data) : res.error,
     data: res.ok ? res.data : undefined,
+    ...classify({ ok, status: res.ok ? res.status : res.status, error: ok ? undefined : res.ok ? undefined : res.error }),
   };
 }
 
@@ -117,10 +129,14 @@ export async function testRpc(params: {
     onLog: params.onLog,
   });
 
-  if (!res.ok) return { ok: false, ms: res.ms, error: res.error };
-  const status = (res.data as any)?.status;
-  const rpcOk = (res.data as any)?.success === true && !!status;
-  return { ok: rpcOk, ms: res.ms, error: rpcOk ? undefined : 'rpc_status_failed', status };
+  if (!res.ok) {
+    return { ok: false, ms: res.ms, status: res.status, error: res.error, ...classify({ ok: false, status: res.status, error: res.error }) };
+  }
+  const statusObj = (res.data as any)?.status;
+  const ok = (res.data as any)?.success === true && !!statusObj;
+  const kind =
+    (res.data as any)?.code === 'bootstrap_rpc_missing' ? ('bootstrap_rpc_missing' as const) : ok ? ('ok' as const) : ('unknown' as const);
+  return { ok, ms: res.ms, status: res.status, error: ok ? undefined : 'rpc_status_failed', kind, statusObj };
 }
 
 export async function runDiagnostics(params: {
@@ -163,7 +179,12 @@ export async function runDiagnostics(params: {
     : { ok: false, ms: 0, error: 'clerk_token_missing' as const, data: undefined };
 
   // Verify minted Supabase JWT actually works against Supabase Auth API
-  let supabaseJwt: { ok: boolean; ms: number; error?: string } = { ok: false, ms: 0, error: 'bridge_not_attempted' };
+  let supabaseJwt: { ok: boolean; ms: number; status?: number; error?: string; kind?: 'ok' | 'timeout' | 'http_error' | 'unknown' } = {
+    ok: false,
+    ms: 0,
+    error: 'bridge_not_attempted',
+    kind: 'unknown',
+  };
   if (edgeClerkVerify.ok) {
     const accessToken = (edgeClerkVerify.data as any)?.session?.access_token as string | undefined;
     if (accessToken) {
@@ -180,17 +201,23 @@ export async function runDiagnostics(params: {
         },
         TIMEOUT_MS
       );
-      supabaseJwt = { ok: res.ok, ms: res.ms, error: res.ok ? undefined : res.error };
+      supabaseJwt = {
+        ok: res.ok,
+        ms: res.ms,
+        status: res.ok ? res.status : res.status,
+        error: res.ok ? undefined : res.error,
+        ...classify({ ok: res.ok, status: res.ok ? res.status : res.status, error: res.ok ? undefined : res.error }),
+      };
     } else {
-      supabaseJwt = { ok: false, ms: edgeClerkVerify.ms, error: 'missing_access_token' };
+      supabaseJwt = { ok: false, ms: edgeClerkVerify.ms, error: 'missing_access_token', kind: 'unknown' };
     }
   }
 
   const connection = host.ok;
   const rpcInstalled = rpcStatus.ok;
   const schemaReady =
-    rpcInstalled && rpcStatus.status?.tables
-      ? rpcStatus.status.tables.projects === true && rpcStatus.status.tables.profiles === true
+    rpcInstalled && rpcStatus.statusObj?.tables
+      ? rpcStatus.statusObj.tables.projects === true && rpcStatus.statusObj.tables.profiles === true
       : false;
   const bridgeReady = supabaseJwt.ok;
 
@@ -221,9 +248,9 @@ export async function runDiagnostics(params: {
     errorMessage,
     checks: {
       host,
-      edgeClerkVerify: { ok: edgeClerkVerify.ok, ms: edgeClerkVerify.ms, error: edgeClerkVerify.error },
-      edgeBootstrapSystem: { ok: edgeBootstrapSystem.ok, ms: edgeBootstrapSystem.ms, error: edgeBootstrapSystem.error },
-      rpcStatus: { ok: rpcStatus.ok, ms: rpcStatus.ms, error: rpcStatus.error, status: rpcStatus.status },
+      edgeClerkVerify,
+      edgeBootstrapSystem,
+      rpcStatus,
       supabaseJwt,
     },
   };

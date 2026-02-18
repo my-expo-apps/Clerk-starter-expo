@@ -1,12 +1,13 @@
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
 import { SetupCard } from '@/components/setup/setup-card';
 import { Stepper, type StepperStep } from '@/components/setup/stepper';
+import { ThemedText } from '@/components/themed-text';
+import { ThemedView } from '@/components/themed-view';
 import { useSystemStatus } from '@/context/SystemStatusContext';
-import { getRuntimeConfig, setRuntimeConfig, clearRuntimeConfig, type RuntimeConfig } from '@/lib/runtime-config';
+import { clearRuntimeConfig, getRuntimeConfig, setRuntimeConfig, type RuntimeConfig } from '@/lib/runtime-config';
 import { initializeDatabase, type ValidationLogEntry } from '@/services/connection-validator';
-import { useRouter } from 'expo-router';
+import { autoFix, type AutoFixProgress } from '@/services/setup-auto-fix';
 import * as Clipboard from 'expo-clipboard';
+import { useRouter } from 'expo-router';
 import * as React from 'react';
 import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 
@@ -31,6 +32,8 @@ export default function Page() {
   const [logsModalOpen, setLogsModalOpen] = React.useState(false);
   const [logs, setLogs] = React.useState<ValidationLogEntry[]>([]);
   const [checks, setChecks] = React.useState<null | Record<string, any>>(null);
+  const [autoFixing, setAutoFixing] = React.useState(false);
+  const [autoFixProgress, setAutoFixProgress] = React.useState<AutoFixProgress[]>([]);
   const [stepOverride, setStepOverride] = React.useState<WizardStep | null>(null);
 
   const [supabaseUrl, setSupabaseUrl] = React.useState('');
@@ -115,6 +118,7 @@ export default function Page() {
     setStatus(null);
     setLogs([]);
     setChecks(null);
+    setAutoFixProgress([]);
     try {
       const v = validateInputs();
       if (!v.ok) {
@@ -157,6 +161,47 @@ export default function Page() {
     } catch (e) {
       setStatus(`Validation error: ${(e as Error).message}`);
     } finally {
+      setBusy(false);
+    }
+  };
+
+  const onAutoFix = async () => {
+    if (!checks) {
+      setStatus('Run diagnostics first (Re-check).');
+      return;
+    }
+
+    setAutoFixing(true);
+    setBusy(true);
+    setStatus(null);
+    setAutoFixProgress([]);
+
+    try {
+      const diag = {
+        connection: system.supabaseConnected,
+        schemaReady: system.schemaReady,
+        rpcInstalled: system.rpcInstalled,
+        bridgeReady: system.bridgeAuthorized,
+        checks,
+      } as any;
+
+      const res = await autoFix(diag, {
+        clerkConnected: system.clerkConnected,
+        onLog: (entry) => setLogs((l) => [...l, entry]),
+        onProgress: (p) => setAutoFixProgress((arr) => [...arr, p]),
+      });
+
+      if (!res.attempted && !res.fixed) {
+        setStatus(res.remainingIssues[0]?.message ?? 'Nothing to auto-fix.');
+        return;
+      }
+
+      setStatus(res.fixed ? '✅ Fixed. Re-checking…' : 'Some issues remain. Re-check for details.');
+      await onValidate();
+    } catch (e) {
+      setStatus(`Auto-fix error: ${(e as Error).message}`);
+    } finally {
+      setAutoFixing(false);
       setBusy(false);
     }
   };
@@ -229,9 +274,25 @@ export default function Page() {
   ];
 
   const maxAccessible = nextIncompleteStep(system);
-  const canNavigateToStep = (idx: number) => idx <= maxAccessible;
+  const canNavigateToStep = (idx: number) => !autoFixing && idx <= maxAccessible;
 
   const primaryAction = () => {
+    const ready = system.supabaseConnected && system.schemaReady && system.rpcInstalled && system.bridgeAuthorized;
+    const hostUnreachable = checks?.host?.ok === false;
+    const edgeNotDeployed =
+      checks?.edgeClerkVerify?.kind === 'not_deployed' ||
+      checks?.edgeBootstrapSystem?.kind === 'not_deployed' ||
+      checks?.rpcStatus?.kind === 'not_deployed';
+
+    const fixable =
+      !ready &&
+      !hostUnreachable &&
+      !edgeNotDeployed &&
+      system.supabaseConnected &&
+      (system.schemaReady === false || system.rpcInstalled === false || (system.bridgeAuthorized === false && system.clerkConnected));
+
+    if (fixable) return { label: autoFixing ? 'Fixing…' : 'Fix Issues', onPress: onAutoFix };
+
     switch (activeStep) {
       case 0:
         return { label: 'Connect', onPress: onValidate };
@@ -246,7 +307,7 @@ export default function Page() {
 
   const primary = primaryAction();
 
-  const canPrimary = inputsOk && !busy;
+  const canPrimary = inputsOk && !busy && !autoFixing;
 
   const StatusRow = ({ label, ok, detail }: { label: string; ok: boolean; detail?: string }) => {
     return (
@@ -255,6 +316,19 @@ export default function Page() {
           {ok ? '✅' : '❌'} {label}
         </ThemedText>
         {detail ? <ThemedText style={styles.statusRowDetail}>{detail}</ThemedText> : null}
+      </View>
+    );
+  };
+
+  const AutoFixPanel = () => {
+    if (!autoFixing && autoFixProgress.length === 0) return null;
+    return (
+      <View style={styles.autoFixPanel}>
+        {autoFixProgress.slice(-6).map((p, idx) => (
+          <ThemedText key={idx} style={styles.autoFixText}>
+            {p.kind === 'done' ? '✓' : p.kind === 'error' ? '!' : '•'} {p.message}
+          </ThemedText>
+        ))}
       </View>
     );
   };
@@ -288,6 +362,8 @@ export default function Page() {
               <ThemedText style={styles.tertiaryText}>Clear</ThemedText>
             </Pressable>
 
+            <AutoFixPanel />
+
             <Pressable style={[styles.primaryButton, !canPrimary && styles.buttonDisabled]} onPress={primary.onPress} disabled={!canPrimary}>
               {busy ? <ActivityIndicator /> : <ThemedText style={styles.primaryButtonText}>{primary.label}</ThemedText>}
             </Pressable>
@@ -304,6 +380,8 @@ export default function Page() {
               If RPC is missing, run <ThemedText style={styles.mono}>supabase db push</ThemedText>.
             </ThemedText>
 
+            <AutoFixPanel />
+
             <Pressable style={[styles.primaryButton, !canPrimary && styles.buttonDisabled]} onPress={primary.onPress} disabled={!canPrimary}>
               {busy ? <ActivityIndicator /> : <ThemedText style={styles.primaryButtonText}>{primary.label}</ThemedText>}
             </Pressable>
@@ -313,6 +391,7 @@ export default function Page() {
         {activeStep === 2 ? (
           <View style={styles.step}>
             <ThemedText style={styles.note}>Authorize Clerk → Supabase bridge (sign in first).</ThemedText>
+            <AutoFixPanel />
             <Pressable style={[styles.primaryButton, !canPrimary && styles.buttonDisabled]} onPress={primary.onPress} disabled={!canPrimary}>
               {busy ? <ActivityIndicator /> : <ThemedText style={styles.primaryButtonText}>{primary.label}</ThemedText>}
             </Pressable>
@@ -357,6 +436,8 @@ export default function Page() {
               </View>
             ) : null}
 
+            <AutoFixPanel />
+
             <Pressable style={[styles.primaryButton, !canPrimary && styles.buttonDisabled]} onPress={primary.onPress} disabled={!canPrimary}>
               {busy ? <ActivityIndicator /> : <ThemedText style={styles.primaryButtonText}>{primary.label}</ThemedText>}
             </Pressable>
@@ -364,13 +445,13 @@ export default function Page() {
         ) : null}
 
         <View style={styles.footerRow}>
-          <Pressable style={styles.footerBtn} onPress={onSave} disabled={busy || !inputsOk}>
+          <Pressable style={styles.footerBtn} onPress={onSave} disabled={busy || !inputsOk || autoFixing}>
             <ThemedText style={styles.footerText}>Save</ThemedText>
           </Pressable>
-          <Pressable style={styles.footerBtn} onPress={() => setLogsModalOpen(true)}>
+          <Pressable style={styles.footerBtn} onPress={() => setLogsModalOpen(true)} disabled={autoFixing}>
             <ThemedText style={styles.footerText}>Logs</ThemedText>
           </Pressable>
-          <Pressable style={styles.footerBtn} onPress={onValidate} disabled={busy || !inputsOk}>
+          <Pressable style={styles.footerBtn} onPress={onValidate} disabled={busy || !inputsOk || autoFixing}>
             <ThemedText style={styles.footerText}>Re-check</ThemedText>
           </Pressable>
         </View>
@@ -487,6 +568,14 @@ const styles = StyleSheet.create({
   },
   statusRowText: { fontWeight: '800', opacity: 0.95 },
   statusRowDetail: { opacity: 0.75 },
+  autoFixPanel: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 12,
+    padding: 10,
+    gap: 6,
+  },
+  autoFixText: { fontSize: 12, opacity: 0.9, fontWeight: '700' },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.55)',
