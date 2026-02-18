@@ -1,3 +1,6 @@
 [functions.clerk-jwt-verify]
 verify_jwt = false
 
+[functions.bootstrap-system]
+verify_jwt = false
+

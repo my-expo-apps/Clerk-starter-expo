@@ -27,16 +27,32 @@ export async function validateSystemConnection(): Promise<SystemConnectionResult
     const sessionRes = await supabase.auth.getSession();
     const supabaseOk = !sessionRes.error;
 
-    const projectsRes = await supabase.from('projects').select('id').limit(1);
-    const dbOk = !projectsRes.error;
-
-    const supabaseConnected = supabaseOk && dbOk;
+    let projectsRes = await supabase.from('projects').select('id').limit(1);
+    let dbOk = !projectsRes.error;
+    let supabaseConnected = supabaseOk && dbOk;
 
     let clerkConnected = false;
     let bridgeAuthorized = false;
 
     const token = clerkTokenProvider ? await clerkTokenProvider() : null;
     clerkConnected = !!token;
+
+    // Auto-bootstrap when projects table is missing
+    if (supabaseOk && projectsRes.error && token) {
+      const msg = projectsRes.error.message.toLowerCase();
+      const looksMissing =
+        msg.includes('does not exist') || msg.includes('relation') || msg.includes('not found') || msg.includes('projects');
+
+      if (looksMissing) {
+        const boot = await supabase.functions.invoke('bootstrap-system', { body: { clerkToken: token } });
+        if (!boot.error) {
+          // Retry DB check after bootstrap
+          projectsRes = await supabase.from('projects').select('id').limit(1);
+          dbOk = !projectsRes.error;
+          supabaseConnected = supabaseOk && dbOk;
+        }
+      }
+    }
 
     if (supabaseConnected && token) {
       const invoke = await supabase.functions.invoke('clerk-jwt-verify', {
