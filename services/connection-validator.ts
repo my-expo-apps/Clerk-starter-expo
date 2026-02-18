@@ -45,7 +45,42 @@ export async function validateSystemConnection(): Promise<SystemConnectionResult
 
       if (looksMissing) {
         const boot = await supabase.functions.invoke('bootstrap-system', { body: { clerkToken: token } });
-        if (!boot.error) {
+        if (boot.error) {
+          const em = boot.error.message ?? '';
+          const lower = em.toLowerCase();
+          const rpcMissing =
+            lower.includes('bootstrap_install') &&
+            (lower.includes('could not find') || lower.includes('not found') || lower.includes('pgrst202'));
+
+          if (rpcMissing) {
+            return {
+              supabase: false,
+              clerk: clerkConnected,
+              bridge: false,
+              error: 'bootstrap_rpc_missing: run supabase db push',
+            };
+          }
+        } else {
+          const data = boot.data as
+            | { success: true; bootstrapped?: true; already_initialized?: true }
+            | { success: false; error: string; code?: string }
+            | null;
+
+          const ok =
+            !!data &&
+            'success' in data &&
+            data.success === true &&
+            (data.bootstrapped === true || data.already_initialized === true);
+
+          if (!ok) {
+            return {
+              supabase: false,
+              clerk: clerkConnected,
+              bridge: false,
+              error: 'bootstrap_failed: unable to initialize database schema',
+            };
+          }
+
           // Retry DB check after bootstrap
           projectsRes = await supabase.from('projects').select('id').limit(1);
           dbOk = !projectsRes.error;
