@@ -1,5 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { createRemoteJWKSet, jwtVerify } from 'npm:jose@5';
+import { createRemoteJWKSet, jwtVerify, SignJWT } from 'npm:jose@5';
 
 type Ok<T> = { success: true } & T;
 type ErrCode =
@@ -20,7 +20,7 @@ type VerifyRequestBody = {
 };
 
 type VerifyResponseBody =
-  | Ok<{ session: { access_token: string; refresh_token: string } }>
+  | Ok<{ session: { access_token: string; refresh_token: null } }>
   | Err;
 
 function json(body: VerifyResponseBody, status = 200) {
@@ -83,23 +83,7 @@ function checkRateLimit(ip: string) {
 }
 
 // Short-lived session cache (avoid generating multiple sessions unnecessarily)
-const sessionCache = new Map<string, { access_token: string; refresh_token: string; expiresAt: number }>();
-const SESSION_CACHE_TTL_MS = 55_000;
-
-function getCachedSession(userId: string) {
-  const now = Date.now();
-  const cached = sessionCache.get(userId);
-  if (!cached) return null;
-  if (now > cached.expiresAt) {
-    sessionCache.delete(userId);
-    return null;
-  }
-  return { access_token: cached.access_token, refresh_token: cached.refresh_token };
-}
-
-function setCachedSession(userId: string, session: { access_token: string; refresh_token: string }) {
-  sessionCache.set(userId, { ...session, expiresAt: Date.now() + SESSION_CACHE_TTL_MS });
-}
+// (removed) session cache logic — custom JWT federation should mint fresh access tokens.
 
 // Supabase auth.users.id is UUID. Clerk `sub` typically is not.
 // For deterministic mapping we derive a UUID v5 from the Clerk user id.
@@ -176,7 +160,7 @@ async function ensureAuthUser(
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
-    return json({ success: true, session: { access_token: '', refresh_token: '' } }, 200);
+    return json({ success: true, session: { access_token: '', refresh_token: null } }, 200);
   }
 
   if (req.method !== 'POST') {
@@ -192,6 +176,7 @@ Deno.serve(async (req) => {
 
     const supabaseUrl = getEnv('SUPABASE_URL');
     const serviceRoleKey = getEnv('SUPABASE_SERVICE_ROLE_KEY');
+    const supabaseJwtSecret = getEnv('SUPABASE_JWT_SECRET');
     const expectedIssuer = getEnv('CLERK_JWT_ISSUER');
     const expectedAudience = getEnv('CLERK_EXPECTED_AUDIENCE');
     const jwksUrl = Deno.env.get('CLERK_JWKS_URL') ?? `${expectedIssuer.replace(/\/+$/, '')}/.well-known/jwks.json`;
@@ -231,12 +216,6 @@ Deno.serve(async (req) => {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
     });
 
-    // Session safety: if we recently issued a session for this user, reuse it.
-    const cached = getCachedSession(supabaseUserId);
-    if (cached) {
-      return json({ success: true, session: cached }, 200);
-    }
-
     let email: string;
     try {
       ({ email } = await ensureAuthUser(supabaseAdmin, supabaseUserId, clerkUserId, payload));
@@ -248,48 +227,31 @@ Deno.serve(async (req) => {
       return json({ success: false, error: 'Internal error', code: 'internal_error' }, 500);
     }
 
-    // Create a Supabase session by generating a magiclink token and verifying it server-side.
-    const link = await supabaseAdmin.auth.admin.generateLink({
-      type: 'magiclink',
+    // Custom JWT federation: mint a Supabase-compatible JWT signed with SUPABASE_JWT_SECRET (HS256).
+    const now = Math.floor(Date.now() / 1000);
+    const exp = now + 60 * 60; // 1 hour
+
+    const accessToken = await new SignJWT({
+      aud: 'authenticated',
       email,
-      options: { redirectTo: 'https://example.invalid' },
-    });
+      role: 'authenticated',
+    })
+      .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+      .setSubject(supabaseUserId)
+      .setIssuedAt(now)
+      .setExpirationTime(exp)
+      .sign(new TextEncoder().encode(supabaseJwtSecret));
 
-    if (link.error) {
-      return json({ success: false, error: 'Failed to generate session', code: 'session_create_failed' }, 500);
-    }
-
-    const tokenHash =
-      (link.data as any)?.properties?.hashed_token ??
-      (link.data as any)?.properties?.hashedToken ??
-      null;
-
-    if (!isNonEmptyString(tokenHash)) {
-      return json({ success: false, error: 'Failed to generate session', code: 'session_create_failed' }, 500);
-    }
-
-    const verifiedOtp = await supabaseAdmin.auth.verifyOtp({
-      type: 'magiclink',
-      token_hash: tokenHash,
-    } as any);
-
-    if (verifiedOtp.error || !verifiedOtp.data?.session) {
-      return json({ success: false, error: 'Failed to create session', code: 'session_create_failed' }, 500);
-    }
-
-    const session = verifiedOtp.data.session;
-    if (!session.access_token || !session.refresh_token) {
-      return json({ success: false, error: 'Failed to create session', code: 'session_create_failed' }, 500);
-    }
-
-    setCachedSession(supabaseUserId, { access_token: session.access_token, refresh_token: session.refresh_token });
-    return json({
-      success: true,
-      session: {
-        access_token: session.access_token,
-        refresh_token: session.refresh_token,
+    return json(
+      {
+        success: true,
+        session: {
+          access_token: accessToken,
+          refresh_token: null,
+        },
       },
-    });
+      200
+    );
   } catch (e) {
     const msg = (e as Error).message ?? '';
     if (msg.startsWith('Missing env:')) {

@@ -53,21 +53,20 @@ export async function validateSystemConnection(): Promise<SystemConnectionResult
       }
 
       const data = invoke.data as
-        | { success: true; session: { access_token: string; refresh_token: string } }
+        | { success: true; session: { access_token: string; refresh_token: null } }
         | { success: false; error: string; code?: string };
 
-      if ('success' in data && data.success && data.session?.access_token && data.session?.refresh_token) {
-        const set = await supabase.auth.setSession({
-          access_token: data.session.access_token,
-          refresh_token: data.session.refresh_token,
-        });
-        bridgeAuthorized = !set.error;
-        if (set.error) {
+      if ('success' in data && data.success && data.session?.access_token) {
+        // Custom JWT federation: we only have an access token.
+        // auth-js `setSession` requires refresh_token; so we validate by fetching the user with this JWT.
+        const userRes = await supabase.auth.getUser(data.session.access_token);
+        bridgeAuthorized = !userRes.error && !!userRes.data?.user;
+        if (!bridgeAuthorized) {
           return {
             supabase: supabaseConnected,
             clerk: clerkConnected,
             bridge: false,
-            error: set.error.message,
+            error: userRes.error?.message ?? 'bridge_failed: invalid_supabase_jwt',
           };
         }
       } else {
