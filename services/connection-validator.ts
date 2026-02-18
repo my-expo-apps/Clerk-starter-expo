@@ -1,11 +1,23 @@
 import { createSupabaseClientFromRuntime } from '@/lib/supabase';
 import { getRuntimeConfig } from '@/lib/runtime-config';
 
-export type SystemConnectionResult = {
-  supabase: boolean;
-  clerk: boolean;
-  bridge: boolean;
-  error?: string;
+export type SystemValidationResult = {
+  connection: boolean;
+  schemaReady: boolean;
+  rpcInstalled: boolean;
+  bridgeReady: boolean;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+export type ValidationLogEntry = {
+  ts: number;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+};
+
+type ValidateOptions = {
+  onLog?: (entry: ValidationLogEntry) => void;
 };
 
 // Optional token provider, set by SystemStatusContext when Clerk is available.
@@ -15,91 +27,130 @@ export function setClerkTokenProvider(provider: null | (() => Promise<string | n
   clerkTokenProvider = provider;
 }
 
-export async function validateSystemConnection(): Promise<SystemConnectionResult> {
+function log(opts: ValidateOptions | undefined, level: ValidationLogEntry['level'], message: string) {
+  opts?.onLog?.({ ts: Date.now(), level, message });
+}
+
+function looksLikeMissingTable(message: string) {
+  const msg = message.toLowerCase();
+  return msg.includes('does not exist') || msg.includes('relation') || msg.includes('not found');
+}
+
+export async function initializeDatabase(opts?: ValidateOptions): Promise<{ ok: boolean; errorCode?: string; errorMessage?: string }> {
   const cfg = await getRuntimeConfig();
-  if (!cfg) {
-    return { supabase: false, clerk: false, bridge: false, error: 'System not configured.' };
-  }
+  if (!cfg) return { ok: false, errorCode: 'not_configured', errorMessage: 'System not configured.' };
+
+  const token = clerkTokenProvider ? await clerkTokenProvider() : null;
+  if (!token) return { ok: false, errorCode: 'clerk_token_missing', errorMessage: 'Sign in first to initialize.' };
 
   try {
     const supabase = await createSupabaseClientFromRuntime();
+    log(opts, 'info', 'Calling bootstrap-system…');
 
+    const boot = await supabase.functions.invoke('bootstrap-system', { body: { clerkToken: token } });
+    if (boot.error) {
+      const lower = (boot.error.message ?? '').toLowerCase();
+      const rpcMissing =
+        lower.includes('bootstrap_install') &&
+        (lower.includes('could not find') || lower.includes('not found') || lower.includes('pgrst202'));
+      if (rpcMissing) {
+        return { ok: false, errorCode: 'bootstrap_rpc_missing', errorMessage: 'Run: supabase db push' };
+      }
+      return { ok: false, errorCode: 'bootstrap_failed', errorMessage: boot.error.message };
+    }
+
+    const data = boot.data as any;
+    const ok = data && data.success === true && (data.bootstrapped === true || data.already_initialized === true);
+    if (!ok) return { ok: false, errorCode: 'bootstrap_failed', errorMessage: 'bootstrap_failed' };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, errorCode: 'bootstrap_failed', errorMessage: (e as Error).message };
+  }
+}
+
+export async function validateSystemConnection(opts?: ValidateOptions): Promise<SystemValidationResult> {
+  const cfg = await getRuntimeConfig();
+  if (!cfg) {
+    return {
+      connection: false,
+      schemaReady: false,
+      rpcInstalled: false,
+      bridgeReady: false,
+      errorCode: 'not_configured',
+      errorMessage: 'System not configured.',
+    };
+  }
+
+  try {
+    log(opts, 'info', 'Creating Supabase client…');
+    const supabase = await createSupabaseClientFromRuntime();
+
+    log(opts, 'info', 'Checking Supabase connection…');
     const sessionRes = await supabase.auth.getSession();
-    const supabaseOk = !sessionRes.error;
+    if (sessionRes.error) {
+      return {
+        connection: false,
+        schemaReady: false,
+        rpcInstalled: false,
+        bridgeReady: false,
+        errorCode: 'supabase_connection_failed',
+        errorMessage: sessionRes.error.message,
+      };
+    }
 
-    let projectsRes = await supabase.from('projects').select('id').limit(1);
-    let dbOk = !projectsRes.error;
-    let supabaseConnected = supabaseOk && dbOk;
+    // Best-effort schema existence check (no secrets, no side effects)
+    log(opts, 'info', 'Checking schema tables…');
+    const projectsRes = await supabase.from('projects').select('id').limit(1);
+    const profilesRes = await supabase.from('profiles').select('id').limit(1);
 
-    let clerkConnected = false;
-    let bridgeAuthorized = false;
+    const projectsExists = !projectsRes.error || !looksLikeMissingTable(projectsRes.error.message);
+    const profilesExists = !profilesRes.error || !looksLikeMissingTable(profilesRes.error.message);
+    let schemaReady = projectsExists && profilesExists;
 
+    // Clerk token presence (used for Edge introspection + bridge)
     const token = clerkTokenProvider ? await clerkTokenProvider() : null;
-    clerkConnected = !!token;
 
-    // Auto-bootstrap when projects table is missing
-    if (supabaseOk && projectsRes.error && token) {
-      const msg = projectsRes.error.message.toLowerCase();
-      const looksMissing =
-        msg.includes('does not exist') || msg.includes('relation') || msg.includes('not found') || msg.includes('projects');
-
-      if (looksMissing) {
-        const boot = await supabase.functions.invoke('bootstrap-system', { body: { clerkToken: token } });
-        if (boot.error) {
-          const em = boot.error.message ?? '';
-          const lower = em.toLowerCase();
-          const rpcMissing =
-            lower.includes('bootstrap_install') &&
-            (lower.includes('could not find') || lower.includes('not found') || lower.includes('pgrst202'));
-
-          if (rpcMissing) {
-            return {
-              supabase: false,
-              clerk: clerkConnected,
-              bridge: false,
-              error: 'bootstrap_rpc_missing: run supabase db push',
-            };
-          }
-        } else {
-          const data = boot.data as
-            | { success: true; bootstrapped?: true; already_initialized?: true }
-            | { success: false; error: string; code?: string }
-            | null;
-
-          const ok =
-            !!data &&
-            'success' in data &&
-            data.success === true &&
-            (data.bootstrapped === true || data.already_initialized === true);
-
-          if (!ok) {
-            return {
-              supabase: false,
-              clerk: clerkConnected,
-              bridge: false,
-              error: 'bootstrap_failed: unable to initialize database schema',
-            };
-          }
-
-          // Retry DB check after bootstrap
-          projectsRes = await supabase.from('projects').select('id').limit(1);
-          dbOk = !projectsRes.error;
-          supabaseConnected = supabaseOk && dbOk;
+    // RPC installed + canonical readiness (via Edge -> service_role -> bootstrap_status)
+    let rpcInstalled = false;
+    if (token) {
+      log(opts, 'info', 'Checking bootstrap RPC status…');
+      const statusInvoke = await supabase.functions.invoke('bootstrap-status', { body: { clerkToken: token } });
+      if (statusInvoke.error) {
+        rpcInstalled = false;
+        log(opts, 'warn', 'bootstrap-status not available.');
+      } else {
+        const data = statusInvoke.data as any;
+        if (data?.success === true && data?.status) {
+          rpcInstalled = true;
+          const tables = data.status.tables as any;
+          if (tables?.projects === true && tables?.profiles === true) schemaReady = true;
+        } else if (data?.success === false && data?.code === 'bootstrap_rpc_missing') {
+          rpcInstalled = false;
+          return {
+            connection: true,
+            schemaReady,
+            rpcInstalled: false,
+            bridgeReady: false,
+            errorCode: 'bootstrap_rpc_missing',
+            errorMessage: 'Run: supabase db push',
+          };
         }
       }
     }
 
-    if (supabaseConnected && token) {
-      const invoke = await supabase.functions.invoke('clerk-jwt-verify', {
-        body: { clerkToken: token },
-      });
-
+    // Bridge authorization
+    let bridgeReady = false;
+    if (token) {
+      log(opts, 'info', 'Authorizing bridge…');
+      const invoke = await supabase.functions.invoke('clerk-jwt-verify', { body: { clerkToken: token } });
       if (invoke.error) {
         return {
-          supabase: supabaseConnected,
-          clerk: clerkConnected,
-          bridge: false,
-          error: invoke.error.message,
+          connection: true,
+          schemaReady,
+          rpcInstalled,
+          bridgeReady: false,
+          errorCode: 'bridge_failed',
+          errorMessage: invoke.error.message,
         };
       }
 
@@ -108,37 +159,46 @@ export async function validateSystemConnection(): Promise<SystemConnectionResult
         | { success: false; error: string; code?: string };
 
       if ('success' in data && data.success && data.session?.access_token) {
-        // Custom JWT federation: we only have an access token.
-        // auth-js `setSession` requires refresh_token; so we validate by fetching the user with this JWT.
         const userRes = await supabase.auth.getUser(data.session.access_token);
-        bridgeAuthorized = !userRes.error && !!userRes.data?.user;
-        if (!bridgeAuthorized) {
+        bridgeReady = !userRes.error && !!userRes.data?.user;
+        if (!bridgeReady) {
           return {
-            supabase: supabaseConnected,
-            clerk: clerkConnected,
-            bridge: false,
-            error: userRes.error?.message ?? 'bridge_failed: invalid_supabase_jwt',
+            connection: true,
+            schemaReady,
+            rpcInstalled,
+            bridgeReady: false,
+            errorCode: 'bridge_failed',
+            errorMessage: userRes.error?.message ?? 'bridge_failed',
           };
         }
       } else {
-        bridgeAuthorized = false;
         return {
-          supabase: supabaseConnected,
-          clerk: clerkConnected,
-          bridge: false,
-          error: 'success' in data ? `${data.code ?? 'bridge_failed'}: ${data.error}` : 'bridge_failed: Bridge failed',
+          connection: true,
+          schemaReady,
+          rpcInstalled,
+          bridgeReady: false,
+          errorCode: 'bridge_failed',
+          errorMessage: 'success' in data ? `${data.code ?? 'bridge_failed'}: ${data.error}` : 'bridge_failed',
         };
       }
     }
 
     return {
-      supabase: supabaseConnected,
-      clerk: clerkConnected,
-      bridge: bridgeAuthorized,
-      ...(supabaseConnected ? null : { error: projectsRes.error?.message || sessionRes.error?.message }),
+      connection: true,
+      schemaReady,
+      rpcInstalled,
+      bridgeReady,
+      ...(schemaReady ? null : { errorCode: 'schema_missing', errorMessage: 'Schema not installed.' }),
     };
   } catch (e) {
-    return { supabase: false, clerk: false, bridge: false, error: (e as Error).message };
+    return {
+      connection: false,
+      schemaReady: false,
+      rpcInstalled: false,
+      bridgeReady: false,
+      errorCode: 'unexpected_error',
+      errorMessage: (e as Error).message,
+    };
   }
 }
 

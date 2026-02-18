@@ -1,18 +1,20 @@
 import * as React from 'react';
 
 import { getRuntimeConfig, isRuntimeConfigured } from '@/lib/runtime-config';
-import { setClerkTokenProvider, validateSystemConnection, type SystemConnectionResult } from '@/services/connection-validator';
+import { setClerkTokenProvider, validateSystemConnection, type SystemValidationResult, type ValidationLogEntry } from '@/services/connection-validator';
 
 export type SystemStatus = {
   configured: boolean;
   supabaseConnected: boolean;
+  schemaReady: boolean;
+  rpcInstalled: boolean;
   clerkConnected: boolean;
   bridgeAuthorized: boolean;
   lastError?: string;
 };
 
 type SystemStatusContextValue = SystemStatus & {
-  refresh: () => Promise<SystemConnectionResult>;
+  refresh: (opts?: { onLog?: (entry: ValidationLogEntry) => void }) => Promise<SystemValidationResult>;
   setClerkGetToken: (fn: null | (() => Promise<string | null>)) => void;
   reloadConfiguredFlag: () => Promise<boolean>;
 };
@@ -29,9 +31,13 @@ export function SystemStatusProvider({ children }: { children: React.ReactNode }
   const [status, setStatus] = React.useState<SystemStatus>({
     configured: false,
     supabaseConnected: false,
+    schemaReady: false,
+    rpcInstalled: false,
     clerkConnected: false,
     bridgeAuthorized: false,
   });
+
+  const clerkGetTokenRef = React.useRef<null | (() => Promise<string | null>)>(null);
 
   const reloadConfiguredFlag = React.useCallback(async () => {
     const configured = await isRuntimeConfigured();
@@ -45,21 +51,35 @@ export function SystemStatusProvider({ children }: { children: React.ReactNode }
     void getRuntimeConfig(); // warm SecureStore
   }, [reloadConfiguredFlag]);
 
-  const refresh = React.useCallback(async () => {
-    const res = await validateSystemConnection();
+  const refresh = React.useCallback(async (opts?: { onLog?: (entry: ValidationLogEntry) => void }) => {
+    const res = await validateSystemConnection(opts);
     const configured = await isRuntimeConfigured();
+
+    // Keep this independent of the validator model:
+    // we consider Clerk "connected" if we can fetch a Clerk token.
+    let clerkConnected = false;
+    try {
+      const token = clerkGetTokenRef.current ? await clerkGetTokenRef.current() : null;
+      clerkConnected = !!token;
+    } catch {
+      clerkConnected = false;
+    }
+
     setStatus((s) => ({
       ...s,
       configured,
-      supabaseConnected: res.supabase,
-      clerkConnected: res.clerk,
-      bridgeAuthorized: res.bridge,
-      lastError: res.error,
+      supabaseConnected: res.connection,
+      schemaReady: res.schemaReady,
+      rpcInstalled: res.rpcInstalled,
+      clerkConnected,
+      bridgeAuthorized: res.bridgeReady,
+      lastError: res.errorMessage,
     }));
     return res;
   }, []);
 
   const setClerkGetToken = React.useCallback((fn: null | (() => Promise<string | null>)) => {
+    clerkGetTokenRef.current = fn;
     setClerkTokenProvider(fn);
   }, []);
 

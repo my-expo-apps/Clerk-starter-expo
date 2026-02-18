@@ -2,6 +2,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { useSystemStatus } from '@/context/SystemStatusContext';
 import { getRuntimeConfig, setRuntimeConfig, clearRuntimeConfig, type RuntimeConfig } from '@/lib/runtime-config';
+import { initializeDatabase, type ValidationLogEntry } from '@/services/connection-validator';
 import * as Clipboard from 'expo-clipboard';
 import * as React from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, TextInput, View } from 'react-native';
@@ -14,6 +15,8 @@ export default function Page() {
   const [status, setStatus] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [validatedOnce, setValidatedOnce] = React.useState(false);
+  const [logsOpen, setLogsOpen] = React.useState(false);
+  const [logs, setLogs] = React.useState<ValidationLogEntry[]>([]);
 
   const [supabaseUrl, setSupabaseUrl] = React.useState('');
   const [supabaseAnonKey, setSupabaseAnonKey] = React.useState('');
@@ -94,6 +97,7 @@ export default function Page() {
   const onValidate = async () => {
     setBusy(true);
     setStatus(null);
+    setLogs([]);
     try {
       // Validate also saves current inputs so users don't need to press "Save" first.
       const v = validateInputs();
@@ -109,30 +113,71 @@ export default function Page() {
       });
       await system.reloadConfiguredFlag();
 
-      const res = await system.refresh();
+      const res = await system.refresh({
+        onLog: (entry) => setLogs((l) => [...l, entry]),
+      });
       setValidatedOnce(true);
 
-      if (res.supabase && res.clerk && res.bridge) {
-        setStatus('✅ All systems authorized. You can use Schema Designer now.');
+      if (res.connection && res.schemaReady && res.rpcInstalled && res.bridgeReady) {
+        setStatus('✅ System ready. You can use Schema Designer now.');
         return;
       }
 
-      // Friendly hints for common failures
-      if (!res.supabase) {
-        setStatus(
-          res.error ??
-            'Supabase failed. Check URL/Anon key and ensure you ran the SQL bootstrap/migrations (projects table must exist).'
-        );
+      if (!res.connection) {
+        setStatus(res.errorMessage ?? 'Supabase connection failed. Check URL/Anon key.');
         return;
       }
-      if (!res.clerk) {
-        setStatus('Clerk failed. Please sign in first (so the app can fetch a Clerk session token).');
+      if (!res.schemaReady) {
+        setStatus('Schema not installed. Press "Initialize Database" or run migrations.');
         return;
       }
-
-      setStatus(res.error ?? 'Bridge failed. Ensure Edge Function env vars are set and the function is deployed.');
+      if (!res.rpcInstalled) {
+        setStatus(res.errorMessage ?? 'Bootstrap RPC missing. Run: supabase db push');
+        return;
+      }
+      setStatus(res.errorMessage ?? 'Bridge not authorized. Ensure Edge Functions are deployed + env vars set.');
     } catch (e) {
       setStatus(`Validation error: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onInitializeDatabase = async () => {
+    setBusy(true);
+    setStatus(null);
+    setLogs([]);
+    try {
+      const v = validateInputs();
+      if (!v.ok) {
+        setStatus(v.error);
+        return;
+      }
+
+      await setRuntimeConfig({
+        supabase_url: v.url,
+        supabase_anon_key: v.anon,
+        clerk_publishable_key: v.clerkPk,
+      });
+      await system.reloadConfiguredFlag();
+
+      const res = await initializeDatabase({
+        onLog: (entry) => setLogs((l) => [...l, entry]),
+      });
+
+      if (!res.ok) {
+        if (res.errorCode === 'bootstrap_rpc_missing') {
+          setStatus('Bootstrap RPC missing. Run: supabase db push');
+          return;
+        }
+        setStatus(res.errorMessage ?? 'Initialize failed.');
+        return;
+      }
+
+      setStatus('✅ Initialized. Re-validating…');
+      await onValidate();
+    } catch (e) {
+      setStatus(`Initialize error: ${(e as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -182,6 +227,10 @@ export default function Page() {
             {busy ? <ActivityIndicator /> : <ThemedText style={styles.buttonText}>Validate & Authorize</ThemedText>}
           </Pressable>
 
+          <Pressable style={styles.button} onPress={onInitializeDatabase} disabled={busy || !system.configured}>
+            {busy ? <ActivityIndicator /> : <ThemedText style={styles.buttonText}>Initialize Database</ThemedText>}
+          </Pressable>
+
           <Pressable style={styles.button} onPress={onClear} disabled={busy}>
             {busy ? <ActivityIndicator /> : <ThemedText style={styles.buttonText}>Clear</ThemedText>}
           </Pressable>
@@ -189,15 +238,37 @@ export default function Page() {
 
         <View style={styles.badges}>
           <View style={[styles.badge, system.supabaseConnected ? styles.badgeOk : styles.badgeBad]}>
-            <ThemedText style={styles.badgeText}>Supabase: {system.supabaseConnected ? 'Connected' : 'Failed'}</ThemedText>
+            <ThemedText style={styles.badgeText}>
+              Supabase Connected: {system.supabaseConnected ? 'YES' : 'NO'}
+            </ThemedText>
           </View>
-          <View style={[styles.badge, system.clerkConnected ? styles.badgeOk : styles.badgeBad]}>
-            <ThemedText style={styles.badgeText}>Clerk: {system.clerkConnected ? 'Connected' : 'Failed'}</ThemedText>
+          <View style={[styles.badge, system.schemaReady ? styles.badgeOk : styles.badgeBad]}>
+            <ThemedText style={styles.badgeText}>Schema Installed: {system.schemaReady ? 'YES' : 'NO'}</ThemedText>
+          </View>
+          <View style={[styles.badge, system.rpcInstalled ? styles.badgeOk : styles.badgeBad]}>
+            <ThemedText style={styles.badgeText}>Bootstrap RPC Installed: {system.rpcInstalled ? 'YES' : 'NO'}</ThemedText>
           </View>
           <View style={[styles.badge, system.bridgeAuthorized ? styles.badgeOk : styles.badgeBad]}>
-            <ThemedText style={styles.badgeText}>Bridge: {system.bridgeAuthorized ? 'Authorized' : 'Failed'}</ThemedText>
+            <ThemedText style={styles.badgeText}>Bridge Authorized: {system.bridgeAuthorized ? 'YES' : 'NO'}</ThemedText>
           </View>
         </View>
+
+        <Pressable style={styles.logToggle} onPress={() => setLogsOpen((v) => !v)}>
+          <ThemedText style={styles.logToggleText}>{logsOpen ? 'Hide logs' : 'Show logs'}</ThemedText>
+        </Pressable>
+        {logsOpen ? (
+          <View style={styles.logsPanel}>
+            {logs.length === 0 ? (
+              <ThemedText style={styles.logsText}>No logs yet.</ThemedText>
+            ) : (
+              logs.map((l, idx) => (
+                <ThemedText key={`${l.ts}-${idx}`} style={styles.logsText}>
+                  [{new Date(l.ts).toLocaleTimeString()}] {l.level.toUpperCase()}: {l.message}
+                </ThemedText>
+              ))
+            )}
+          </View>
+        ) : null}
 
         {validatedOnce && system.lastError ? <ThemedText style={styles.status}>{system.lastError}</ThemedText> : null}
         {status ? <ThemedText style={styles.status}>{status}</ThemedText> : null}
@@ -246,6 +317,27 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   status: {
+    opacity: 0.9,
+  },
+  logToggle: {
+    alignSelf: 'flex-start',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  logToggleText: { fontWeight: '700' },
+  logsPanel: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 12,
+    padding: 10,
+    gap: 6,
+    maxHeight: 220,
+  },
+  logsText: {
+    fontSize: 12,
     opacity: 0.9,
   },
   badges: {
