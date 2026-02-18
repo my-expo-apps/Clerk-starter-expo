@@ -7,7 +7,8 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "validate": "node -r ts-node/register -e \"require('./scripts/validate-foundation.ts')\""
+    "validate": "node -r ts-node/register -e \"require('./scripts/validate-foundation.ts')\"",
+    "test": "vitest"
   },
   "dependencies": {
     "@clerk/clerk-expo": "^2.19.24",
@@ -41,6 +42,7 @@
     "react-test-renderer": "19.1.0",
     "dotenv": "^16.6.1",
     "ts-node": "^10.9.2",
+    "vitest": "^3.2.4",
     "typescript": "~5.9.2"
   },
   "private": true
