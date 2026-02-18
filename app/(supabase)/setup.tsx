@@ -1,30 +1,74 @@
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { supabase } from '@/lib/supabase';
+import { useSystemStatus } from '@/context/SystemStatusContext';
+import { getRuntimeConfig, setRuntimeConfig, clearRuntimeConfig, type RuntimeConfig } from '@/lib/runtime-config';
 import * as Clipboard from 'expo-clipboard';
 import * as React from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 const migrationPath = 'supabase/migrations/001_init.sql';
 
 export default function Page() {
+  const system = useSystemStatus();
+
   const [status, setStatus] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
 
-  const onTest = async () => {
+  const [supabaseUrl, setSupabaseUrl] = React.useState('');
+  const [supabaseAnonKey, setSupabaseAnonKey] = React.useState('');
+  const [clerkPublishableKey, setClerkPublishableKey] = React.useState('');
+
+  React.useEffect(() => {
+    void (async () => {
+      const cfg = await getRuntimeConfig();
+      if (!cfg) return;
+      setSupabaseUrl(cfg.supabase_url);
+      setSupabaseAnonKey(cfg.supabase_anon_key);
+      setClerkPublishableKey(cfg.clerk_publishable_key);
+    })();
+  }, []);
+
+  const onSave = async () => {
     setBusy(true);
     setStatus(null);
     try {
-      // Minimal sanity check: attempt a harmless query. It will fail with a useful message
-      // until migrations are applied and RLS/auth are configured.
-      const res = await supabase.from('projects').select('id').limit(1);
-      if (res.error) {
-        setStatus(`Supabase reached, but query failed: ${res.error.message}`);
-      } else {
-        setStatus('Connected to Supabase and query succeeded.');
-      }
+      const cfg: RuntimeConfig = {
+        supabase_url: supabaseUrl.trim(),
+        supabase_anon_key: supabaseAnonKey.trim(),
+        clerk_publishable_key: clerkPublishableKey.trim(),
+      };
+      await setRuntimeConfig(cfg);
+      await system.reloadConfiguredFlag();
+      setStatus('Saved runtime configuration.');
     } catch (e) {
-      setStatus(`Connection error: ${(e as Error).message}`);
+      setStatus(`Save failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onClear = async () => {
+    setBusy(true);
+    setStatus(null);
+    try {
+      await clearRuntimeConfig();
+      await system.reloadConfiguredFlag();
+      setStatus('Cleared runtime configuration.');
+    } catch (e) {
+      setStatus(`Clear failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onValidate = async () => {
+    setBusy(true);
+    setStatus(null);
+    try {
+      const res = await system.refresh();
+      setStatus(res.error ?? 'Validation completed.');
+    } catch (e) {
+      setStatus(`Validation error: ${(e as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -38,15 +82,20 @@ export default function Page() {
   return (
     <ThemedView style={styles.container}>
       <ThemedText type="title">Supabase setup</ThemedText>
-      <ThemedText type="subtitle">Prep mode: schema + client config</ThemedText>
+      <ThemedText type="subtitle">Runtime secrets + system validation</ThemedText>
 
       <View style={styles.card}>
-        <ThemedText>
-          1) Create a Supabase project{'\n'}
-          2) Add env vars:{'\n'}
-          - EXPO_PUBLIC_SUPABASE_URL{'\n'}
-          - EXPO_PUBLIC_SUPABASE_ANON_KEY{'\n'}
-          3) Run the starter migration: {migrationPath}
+        <ThemedText style={styles.label}>Supabase URL</ThemedText>
+        <TextInput style={styles.input} value={supabaseUrl} onChangeText={setSupabaseUrl} placeholder="https://xxxx.supabase.co" />
+
+        <ThemedText style={styles.label}>Supabase Anon Key</ThemedText>
+        <TextInput style={styles.input} value={supabaseAnonKey} onChangeText={setSupabaseAnonKey} placeholder="eyJ..." />
+
+        <ThemedText style={styles.label}>Clerk Publishable Key</ThemedText>
+        <TextInput style={styles.input} value={clerkPublishableKey} onChangeText={setClerkPublishableKey} placeholder="pk_..." />
+
+        <ThemedText style={styles.note}>
+          Migration path: {migrationPath}
         </ThemedText>
 
         <View style={styles.row}>
@@ -54,9 +103,29 @@ export default function Page() {
             <ThemedText style={styles.buttonText}>Copy migration path</ThemedText>
           </Pressable>
 
-          <Pressable style={styles.button} onPress={onTest} disabled={busy}>
-            {busy ? <ActivityIndicator /> : <ThemedText style={styles.buttonText}>Test connection</ThemedText>}
+          <Pressable style={styles.button} onPress={onSave} disabled={busy}>
+            {busy ? <ActivityIndicator /> : <ThemedText style={styles.buttonText}>Save</ThemedText>}
           </Pressable>
+
+          <Pressable style={styles.button} onPress={onValidate} disabled={busy || !system.configured}>
+            {busy ? <ActivityIndicator /> : <ThemedText style={styles.buttonText}>Validate & Authorize</ThemedText>}
+          </Pressable>
+
+          <Pressable style={styles.button} onPress={onClear} disabled={busy}>
+            {busy ? <ActivityIndicator /> : <ThemedText style={styles.buttonText}>Clear</ThemedText>}
+          </Pressable>
+        </View>
+
+        <View style={styles.badges}>
+          <View style={[styles.badge, system.supabaseConnected ? styles.badgeOk : styles.badgeBad]}>
+            <ThemedText style={styles.badgeText}>Supabase: {system.supabaseConnected ? 'Connected' : 'Failed'}</ThemedText>
+          </View>
+          <View style={[styles.badge, system.clerkConnected ? styles.badgeOk : styles.badgeBad]}>
+            <ThemedText style={styles.badgeText}>Clerk: {system.clerkConnected ? 'Connected' : 'Failed'}</ThemedText>
+          </View>
+          <View style={[styles.badge, system.bridgeAuthorized ? styles.badgeOk : styles.badgeBad]}>
+            <ThemedText style={styles.badgeText}>Bridge: {system.bridgeAuthorized ? 'Authorized' : 'Failed'}</ThemedText>
+          </View>
         </View>
 
         {status ? <ThemedText style={styles.status}>{status}</ThemedText> : null}
@@ -78,6 +147,17 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.12)',
     gap: 12,
   },
+  label: { fontWeight: '700' },
+  input: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(0,0,0,0.15)',
+    color: '#fff',
+  },
+  note: { opacity: 0.85 },
   row: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -96,5 +176,20 @@ const styles = StyleSheet.create({
   status: {
     opacity: 0.9,
   },
+  badges: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  badge: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  badgeOk: { backgroundColor: 'rgba(46, 204, 113, 0.15)' },
+  badgeBad: { backgroundColor: 'rgba(231, 76, 60, 0.15)' },
+  badgeText: { fontWeight: '700' },
 });
 

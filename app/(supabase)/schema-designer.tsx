@@ -1,6 +1,8 @@
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { useSystemStatus } from '@/context/SystemStatusContext';
 import * as Clipboard from 'expo-clipboard';
+import { Link } from 'expo-router';
 import * as React from 'react';
 import { Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 
@@ -50,6 +52,7 @@ function toSql(draft: TableDraft) {
 }
 
 export default function Page() {
+  const system = useSystemStatus();
   const [table, setTable] = React.useState<TableDraft>({
     name: 'my_table',
     fields: [
@@ -58,6 +61,22 @@ export default function Page() {
     ],
   });
   const [copied, setCopied] = React.useState<string | null>(null);
+
+  if (!system.bridgeAuthorized) {
+    return (
+      <ThemedView style={styles.container}>
+        <ThemedText type="title">System Not Authorized</ThemedText>
+        <ThemedText type="subtitle">
+          Please complete “Validate & Authorize” in Setup before using the Schema Designer.
+        </ThemedText>
+        <Link href="/(supabase)/setup" asChild>
+          <Pressable style={styles.blockBtn}>
+            <ThemedText style={styles.blockBtnText}>Go to Setup</ThemedText>
+          </Pressable>
+        </Link>
+      </ThemedView>
+    );
+  }
 
   const sql = React.useMemo(() => toSql(table), [table]);
 
@@ -149,6 +168,18 @@ const styles = StyleSheet.create({
     flex: 1,
     padding: 20,
     gap: 14,
+  },
+  blockBtn: {
+    marginTop: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    alignSelf: 'flex-start',
+  },
+  blockBtnText: {
+    fontWeight: '800',
   },
   section: {
     gap: 10,

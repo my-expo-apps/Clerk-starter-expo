@@ -3,16 +3,21 @@ import 'react-native-url-polyfill/auto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 
-import { getSupabaseConfig } from '@/config/supabase';
+import { getRuntimeConfig } from '@/lib/runtime-config';
 
-const { url, anonKey } = getSupabaseConfig();
+export async function createSupabaseClientFromRuntime() {
+  const cfg = await getRuntimeConfig();
+  if (!cfg) {
+    throw new Error('System not configured. Please open Supabase Setup and save runtime configuration.');
+  }
 
-export const supabase = createClient(url, anonKey, {
-  auth: {
-    storage: AsyncStorage,
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: false,
-  },
-});
+  return createClient(cfg.supabase_url, cfg.supabase_anon_key, {
+    auth: {
+      storage: AsyncStorage,
+      autoRefreshToken: true,
+      persistSession: true,
+      detectSessionInUrl: false,
+    },
+  });
+}
 
