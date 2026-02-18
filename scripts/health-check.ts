@@ -7,6 +7,8 @@ const path = require('node:path');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { runDiagnostics } = require('../services/diagnostics-engine');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+const { mapKnownFailure } = require('./error-map');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { environments } = require(path.join(process.cwd(), 'config', 'environments.ts'));
 
 function env(name: string): string | null {
@@ -41,6 +43,10 @@ function loadDotEnvIfPresent(envFile: string) {
 }
 
 async function main() {
+  const startedAt = Date.now();
+  const total = 4;
+  const block = (n: number, msg: string) => console.log(`[${n}/${total}] ${msg}`);
+
   let envKey: 'dev' | 'staging' | 'prod' = 'dev';
   try {
     envKey = parseEnvArg(process.argv);
@@ -53,6 +59,7 @@ async function main() {
   }
 
   const envProfile = environments[envKey];
+  block(1, `Loading env (${envKey})…`);
   loadDotEnvIfPresent(envProfile.envFile);
 
   const supabaseUrl = env('SUPABASE_URL');
@@ -60,13 +67,19 @@ async function main() {
   const clerkTestJwt = env('CLERK_TEST_JWT');
 
   if (!supabaseUrl || !supabaseAnonKey || !clerkTestJwt) {
-    console.log(`Supabase Host: FAIL`);
-    console.log(`Edge Function: FAIL`);
-    console.log(`RPC: FAIL`);
-    console.log(`System Ready: NO`);
-    process.exit(1);
+    const isCi = env('CI') === 'true';
+    console.log(`Supabase Host: SKIP`);
+    console.log(`Edge Function: SKIP`);
+    console.log(`RPC: SKIP`);
+    console.log(`System Ready: SKIP`);
+    console.log(`Reason: missing env (SUPABASE_URL, SUPABASE_ANON_KEY, CLERK_TEST_JWT) for ${envProfile.envFile}`);
+    console.log(`Total time: ${Date.now() - startedAt}ms`);
+    process.exit(isCi ? 0 : 1);
   }
 
+  block(2, 'Checking Supabase host…');
+  block(3, 'Checking edge functions…');
+  block(4, 'Checking RPC…');
   const diag = await runDiagnostics({
     supabaseUrl,
     supabaseAnonKey,
@@ -82,6 +95,15 @@ async function main() {
   console.log(`Edge Function: ${edgeOk ? 'OK' : 'FAIL'}`);
   console.log(`RPC: ${rpcOk ? 'OK' : 'FAIL'}`);
   console.log(`System Ready: ${ready ? 'YES' : 'NO'}`);
+  if (!ready) {
+    const friendly =
+      mapKnownFailure(diag.checks.host) ||
+      mapKnownFailure(diag.checks.edgeClerkVerify) ||
+      mapKnownFailure(diag.checks.rpcStatus) ||
+      mapKnownFailure(diag.errorCode || '');
+    if (friendly?.message) console.log(`Reason: ${friendly.message}`);
+  }
+  console.log(`Total time: ${Date.now() - startedAt}ms`);
 
   process.exit(ready ? 0 : 1);
 }

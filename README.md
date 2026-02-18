@@ -317,6 +317,16 @@ npm run health-check
 - **staging** → pre-production testing
 - **prod** → production deployment
 
+### Env files
+
+Copy `.env.template` to one of:
+
+- `.env.dev`
+- `.env.staging`
+- `.env.prod`
+
+Then fill in values for that environment.
+
 ### CLI usage
 
 - **Setup provisioning for an environment** (default is `dev`):

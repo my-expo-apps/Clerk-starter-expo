@@ -2,6 +2,9 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+// Load via absolute path to avoid module resolution edge-cases when invoked via `node -r ts-node/register -e ...`
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { mapKnownFailure } = require(path.join(process.cwd(), 'scripts', 'error-map.ts'));
 
 type Step = { name: string; ok: boolean; detail?: string };
 
@@ -125,6 +128,7 @@ function wouldRun(cmd: string, args: string[]) {
 }
 
 async function main() {
+  const startedAt = Date.now();
   const steps: Step[] = [];
   const push = (s: Step) => steps.push(s);
 
@@ -151,6 +155,9 @@ async function main() {
     console.log(`- Would generate: ${envProfile.envFile} (skipped in dry-run)`);
     process.exit(0);
   }
+
+  const total = 4;
+  const block = (n: number, msg: string) => console.log(`[${n}/${total}] ${msg}`);
 
   const supabase = hasCli('supabase', ['--version']);
   push({ name: 'Supabase CLI installed', ok: supabase.ok, detail: supabase.ok ? supabase.version : 'Install: https://supabase.com/docs/guides/cli' });
@@ -207,39 +214,50 @@ async function main() {
   push({ name: 'Clerk expected audience present', ok: !!clerkAudience });
 
   // Link (non-interactive)
+  block(1, 'Linking project…');
   try {
     run('supabase', ['link', '--project-ref', projectRef, '--password', dbPassword]);
     push({ name: 'supabase link', ok: true });
   } catch (e) {
-    push({ name: 'supabase link', ok: false, detail: (e as Error).message });
+    const msg = (e as Error).message;
+    const friendly = mapKnownFailure(msg);
+    push({ name: 'supabase link', ok: false, detail: friendly?.message ?? msg });
     return finish(steps, 1);
   }
 
   // Push migrations
+  block(2, 'Applying migrations…');
   try {
     run('supabase', ['db', 'push']);
     push({ name: 'supabase db push', ok: true });
   } catch (e) {
-    push({ name: 'supabase db push', ok: false, detail: (e as Error).message });
+    const msg = (e as Error).message;
+    const friendly = mapKnownFailure(msg);
+    push({ name: 'supabase db push', ok: false, detail: friendly?.message ?? msg });
     return finish(steps, 1);
   }
 
   // Deploy edge functions (no-verify-jwt because we validate ourselves)
+  block(3, 'Deploying edge functions…');
   const functions = ['clerk-jwt-verify', 'bootstrap-system', 'bootstrap-status'];
   for (const fn of functions) {
     try {
       run('supabase', ['functions', 'deploy', fn, '--no-verify-jwt']);
       push({ name: `deploy function: ${fn}`, ok: true });
     } catch (e) {
-      push({ name: `deploy function: ${fn}`, ok: false, detail: (e as Error).message });
+      const msg = (e as Error).message;
+      const friendly = mapKnownFailure(msg);
+      push({ name: `deploy function: ${fn}`, ok: false, detail: friendly?.message ?? msg });
       return finish(steps, 1);
     }
   }
 
   // Generate .env (for local dev only; do not commit)
+  block(4, 'Validating system…');
   if (mode.ci) {
     push({ name: `generate ${envProfile.envFile}`, ok: true, detail: 'skipped (CI=true)' });
-    return finish(steps, 0);
+    push({ name: 'next step', ok: true, detail: `Run: npm run health-check -- --env=${mode.env}` });
+    return finish(steps, 0, startedAt);
   }
 
   const repoRoot = process.cwd();
@@ -273,25 +291,34 @@ async function main() {
       detail: already ? `Existing ${envProfile.envFile} detected; wrote ${path.basename(outPath)} instead.` : undefined,
     });
   } catch (e) {
-    push({ name: 'generate .env', ok: false, detail: (e as Error).message });
-    return finish(steps, 1);
+    const msg = (e as Error).message;
+    const friendly = mapKnownFailure(msg);
+    push({ name: `generate ${envProfile.envFile}`, ok: false, detail: friendly?.message ?? msg });
+    return finish(steps, 1, startedAt);
   }
 
-  return finish(steps, 0);
+  push({ name: 'next step', ok: true, detail: `Run: npm run health-check -- --env=${mode.env}` });
+  return finish(steps, 0, startedAt);
 }
 
-function finish(steps: Step[], exitCode: number) {
+function finish(steps: Step[], exitCode: number, startedAt?: number) {
   for (const s of steps) {
     const icon = s.ok ? '✔' : '✖';
     const suffix = s.detail ? ` — ${s.detail}` : '';
     console.log(`${icon} ${s.name}${suffix}`);
+  }
+  if (typeof startedAt === 'number') {
+    const ms = Date.now() - startedAt;
+    console.log(`Total time: ${ms}ms`);
   }
   process.exit(exitCode);
 }
 
 main().catch((e) => {
   console.error('✖ setup-project: unexpected error');
-  console.error((e as Error).message);
+  const msg = (e as Error).message;
+  const friendly = mapKnownFailure(msg);
+  console.error(friendly?.message ?? msg);
   process.exit(1);
 });
 
