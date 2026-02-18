@@ -25,6 +25,14 @@ export function base64urlDecode(input: string) {
   return Buffer.from(b64, 'base64');
 }
 
+export function base64urlEncode(buf: Buffer) {
+  return buf
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+}
+
 export function decodeJwtNoVerify(token: string): { header: any; payload: any; signingInput: string; signatureB64u: string } {
   const parts = token.split('.');
   if (parts.length !== 3) throw new Error('jwt_malformed');
@@ -32,6 +40,16 @@ export function decodeJwtNoVerify(token: string): { header: any; payload: any; s
   const header = JSON.parse(base64urlDecode(h).toString('utf8'));
   const payload = JSON.parse(base64urlDecode(p).toString('utf8'));
   return { header, payload, signingInput: `${h}.${p}`, signatureB64u: s };
+}
+
+export function signJwtHs256(payload: Record<string, unknown>, secret: string) {
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const h = base64urlEncode(Buffer.from(JSON.stringify(header), 'utf8'));
+  const p = base64urlEncode(Buffer.from(JSON.stringify(payload), 'utf8'));
+  const signingInput = `${h}.${p}`;
+  const mac = createHmac('sha256', Buffer.from(secret, 'utf8')).update(signingInput).digest();
+  const sig = base64urlEncode(mac);
+  return `${signingInput}.${sig}`;
 }
 
 export function verifyHs256(token: string, secret: string): boolean {
