@@ -13,6 +13,7 @@ export default function Page() {
 
   const [status, setStatus] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
+  const [validatedOnce, setValidatedOnce] = React.useState(false);
 
   const [supabaseUrl, setSupabaseUrl] = React.useState('');
   const [supabaseAnonKey, setSupabaseAnonKey] = React.useState('');
@@ -28,14 +29,43 @@ export default function Page() {
     })();
   }, []);
 
+  const normalizeClerkKey = (v: string) => {
+    const trimmed = v.trim();
+    // Accept people pasting "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_..."
+    const prefix = 'EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY=';
+    if (trimmed.startsWith(prefix)) return trimmed.slice(prefix.length).trim();
+    return trimmed;
+  };
+
+  const validateInputs = () => {
+    const url = supabaseUrl.trim();
+    const anon = supabaseAnonKey.trim();
+    const clerkPk = normalizeClerkKey(clerkPublishableKey);
+
+    if (!url || !anon || !clerkPk) return { ok: false as const, error: 'Please fill all fields.' };
+    try {
+      const u = new URL(url);
+      if (!u.protocol.startsWith('http')) return { ok: false as const, error: 'Supabase URL must start with https://' };
+    } catch {
+      return { ok: false as const, error: 'Supabase URL is not a valid URL.' };
+    }
+    if (!clerkPk.startsWith('pk_')) return { ok: false as const, error: 'Clerk key must start with pk_...' };
+    return { ok: true as const, url, anon, clerkPk };
+  };
+
   const onSave = async () => {
     setBusy(true);
     setStatus(null);
     try {
+      const v = validateInputs();
+      if (!v.ok) {
+        setStatus(v.error);
+        return;
+      }
       const cfg: RuntimeConfig = {
-        supabase_url: supabaseUrl.trim(),
-        supabase_anon_key: supabaseAnonKey.trim(),
-        clerk_publishable_key: clerkPublishableKey.trim(),
+        supabase_url: v.url,
+        supabase_anon_key: v.anon,
+        clerk_publishable_key: v.clerkPk,
       };
       await setRuntimeConfig(cfg);
       await system.reloadConfiguredFlag();
@@ -65,8 +95,42 @@ export default function Page() {
     setBusy(true);
     setStatus(null);
     try {
+      // Validate also saves current inputs so users don't need to press "Save" first.
+      const v = validateInputs();
+      if (!v.ok) {
+        setStatus(v.error);
+        return;
+      }
+
+      await setRuntimeConfig({
+        supabase_url: v.url,
+        supabase_anon_key: v.anon,
+        clerk_publishable_key: v.clerkPk,
+      });
+      await system.reloadConfiguredFlag();
+
       const res = await system.refresh();
-      setStatus(res.error ?? 'Validation completed.');
+      setValidatedOnce(true);
+
+      if (res.supabase && res.clerk && res.bridge) {
+        setStatus('✅ All systems authorized. You can use Schema Designer now.');
+        return;
+      }
+
+      // Friendly hints for common failures
+      if (!res.supabase) {
+        setStatus(
+          res.error ??
+            'Supabase failed. Check URL/Anon key and ensure you ran the SQL bootstrap/migrations (projects table must exist).'
+        );
+        return;
+      }
+      if (!res.clerk) {
+        setStatus('Clerk failed. Please sign in first (so the app can fetch a Clerk session token).');
+        return;
+      }
+
+      setStatus(res.error ?? 'Bridge failed. Ensure Edge Function env vars are set and the function is deployed.');
     } catch (e) {
       setStatus(`Validation error: ${(e as Error).message}`);
     } finally {
@@ -92,7 +156,14 @@ export default function Page() {
         <TextInput style={styles.input} value={supabaseAnonKey} onChangeText={setSupabaseAnonKey} placeholder="eyJ..." />
 
         <ThemedText style={styles.label}>Clerk Publishable Key</ThemedText>
-        <TextInput style={styles.input} value={clerkPublishableKey} onChangeText={setClerkPublishableKey} placeholder="pk_..." />
+        <TextInput
+          style={styles.input}
+          value={clerkPublishableKey}
+          onChangeText={setClerkPublishableKey}
+          placeholder="pk_..."
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
 
         <ThemedText style={styles.note}>
           Migration path: {migrationPath}
@@ -128,6 +199,7 @@ export default function Page() {
           </View>
         </View>
 
+        {validatedOnce && system.lastError ? <ThemedText style={styles.status}>{system.lastError}</ThemedText> : null}
         {status ? <ThemedText style={styles.status}>{status}</ThemedText> : null}
       </View>
     </ThemedView>
