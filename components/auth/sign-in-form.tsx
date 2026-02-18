@@ -3,8 +3,9 @@ import { useSignIn } from '@clerk/clerk-expo';
 import type { EmailCodeFactor } from '@clerk/types';
 import { Link, useRouter } from 'expo-router';
 import * as React from 'react';
-import { Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { useThemeColor } from '@/components/Themed';
+import { toAuthUiError } from './clerk-error';
 
 export function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp?: () => void }) {
   const { signIn, setActive, isLoaded } = useSignIn();
@@ -14,11 +15,18 @@ export function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp?: () => void
   const [password, setPassword] = React.useState('');
   const [code, setCode] = React.useState('');
   const [showEmailCode, setShowEmailCode] = React.useState(false);
+  const [errorText, setErrorText] = React.useState<string | null>(null);
+  const [pendingAction, setPendingAction] = React.useState<'switch-to-sign-up' | null>(null);
+  const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [isVerifying, setIsVerifying] = React.useState(false);
 
   const onSignInPress = React.useCallback(async () => {
     if (!isLoaded) return;
 
     try {
+      setIsSubmitting(true);
+      setErrorText(null);
+      setPendingAction(null);
       const signInAttempt = await signIn.create({
         identifier: emailAddress,
         password,
@@ -50,9 +58,15 @@ export function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp?: () => void
         }
       } else {
         console.error(JSON.stringify(signInAttempt, null, 2));
+        setErrorText('לא הצלחנו להתחבר. נסה שוב.');
       }
     } catch (err) {
       console.error(JSON.stringify(err, null, 2));
+      const ui = toAuthUiError(err);
+      setErrorText(ui.message);
+      setPendingAction(ui.action === 'switch-to-sign-up' ? 'switch-to-sign-up' : null);
+    } finally {
+      setIsSubmitting(false);
     }
   }, [isLoaded, signIn, setActive, router, emailAddress, password]);
 
@@ -60,6 +74,8 @@ export function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp?: () => void
     if (!isLoaded) return;
 
     try {
+      setIsVerifying(true);
+      setErrorText(null);
       const signInAttempt = await signIn.attemptSecondFactor({
         strategy: 'email_code',
         code,
@@ -79,9 +95,14 @@ export function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp?: () => void
         });
       } else {
         console.error(JSON.stringify(signInAttempt, null, 2));
+        setErrorText('לא הצלחנו לאמת את הקוד. נסה שוב.');
       }
     } catch (err) {
       console.error(JSON.stringify(err, null, 2));
+      const ui = toAuthUiError(err);
+      setErrorText(ui.message);
+    } finally {
+      setIsVerifying(false);
     }
   }, [isLoaded, signIn, setActive, router, code]);
 
@@ -91,6 +112,7 @@ export function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp?: () => void
   const primary = useThemeColor({}, 'primary');
   const primaryText = useThemeColor({}, 'primaryText');
   const muted = useThemeColor({}, 'mutedText');
+  const border = useThemeColor({}, 'border');
 
   if (showEmailCode) {
     return (
@@ -106,14 +128,23 @@ export function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp?: () => void
           value={code}
           placeholder="Enter verification code"
           placeholderTextColor="#666666"
-          onChangeText={setCode}
+          onChangeText={(v) => {
+            setCode(v);
+            setErrorText(null);
+          }}
           keyboardType="numeric"
         />
+        {errorText ? <ThemedText style={[styles.error, { borderColor: border }]}>{errorText}</ThemedText> : null}
         <Pressable
           style={({ pressed }) => [styles.button, { backgroundColor: primary }, pressed && styles.buttonPressed]}
           onPress={onVerifyPress}
+          disabled={isVerifying || !code}
         >
-          <ThemedText style={[styles.buttonText, { color: primaryText }]}>Verify</ThemedText>
+          {isVerifying ? (
+            <ActivityIndicator color={primaryText} />
+          ) : (
+            <ThemedText style={[styles.buttonText, { color: primaryText }]}>Verify</ThemedText>
+          )}
         </Pressable>
       </View>
     );
@@ -132,7 +163,11 @@ export function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp?: () => void
         value={emailAddress}
         placeholder="Enter email"
         placeholderTextColor="#666666"
-        onChangeText={setEmailAddress}
+        onChangeText={(v) => {
+          setEmailAddress(v);
+          setErrorText(null);
+          setPendingAction(null);
+        }}
         keyboardType="email-address"
       />
 
@@ -143,8 +178,19 @@ export function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp?: () => void
         placeholder="Enter password"
         placeholderTextColor="#666666"
         secureTextEntry={true}
-        onChangeText={setPassword}
+        onChangeText={(v) => {
+          setPassword(v);
+          setErrorText(null);
+          setPendingAction(null);
+        }}
       />
+
+      {errorText ? <ThemedText style={[styles.error, { borderColor: border }]}>{errorText}</ThemedText> : null}
+      {pendingAction === 'switch-to-sign-up' && onSwitchToSignUp ? (
+        <Pressable onPress={onSwitchToSignUp}>
+          <ThemedText type="link">לעבור להרשמה</ThemedText>
+        </Pressable>
+      ) : null}
 
       <Pressable
         style={({ pressed }) => [
@@ -154,9 +200,13 @@ export function SignInForm({ onSwitchToSignUp }: { onSwitchToSignUp?: () => void
           pressed && styles.buttonPressed,
         ]}
         onPress={onSignInPress}
-        disabled={!emailAddress || !password}
+        disabled={!emailAddress || !password || isSubmitting}
       >
-        <ThemedText style={[styles.buttonText, { color: primaryText }]}>Continue</ThemedText>
+        {isSubmitting ? (
+          <ActivityIndicator color={primaryText} />
+        ) : (
+          <ThemedText style={[styles.buttonText, { color: primaryText }]}>Continue</ThemedText>
+        )}
       </Pressable>
 
       <View style={styles.linkContainer}>
@@ -224,6 +274,13 @@ const styles = StyleSheet.create({
     gap: 4,
     marginTop: 12,
     alignItems: 'center',
+  },
+  error: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderRadius: 10,
+    opacity: 0.95,
   },
 });
 

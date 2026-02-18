@@ -2,8 +2,9 @@ import { ThemedText } from '@/components/themed-text';
 import { useSignUp } from '@clerk/clerk-expo';
 import { Link, useRouter } from 'expo-router';
 import * as React from 'react';
-import { Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { useThemeColor } from '@/components/Themed';
+import { toAuthUiError } from './clerk-error';
 
 export function SignUpForm({ onSwitchToSignIn }: { onSwitchToSignIn?: () => void }) {
   const { isLoaded, signUp, setActive } = useSignUp();
@@ -13,11 +14,18 @@ export function SignUpForm({ onSwitchToSignIn }: { onSwitchToSignIn?: () => void
   const [password, setPassword] = React.useState('');
   const [pendingVerification, setPendingVerification] = React.useState(false);
   const [code, setCode] = React.useState('');
+  const [errorText, setErrorText] = React.useState<string | null>(null);
+  const [pendingAction, setPendingAction] = React.useState<'switch-to-sign-in' | null>(null);
+  const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [isVerifying, setIsVerifying] = React.useState(false);
 
   const onSignUpPress = async () => {
     if (!isLoaded) return;
 
     try {
+      setIsSubmitting(true);
+      setErrorText(null);
+      setPendingAction(null);
       await signUp.create({
         emailAddress,
         password,
@@ -27,6 +35,11 @@ export function SignUpForm({ onSwitchToSignIn }: { onSwitchToSignIn?: () => void
       setPendingVerification(true);
     } catch (err) {
       console.error(JSON.stringify(err, null, 2));
+      const ui = toAuthUiError(err);
+      setErrorText(ui.message);
+      setPendingAction(ui.action === 'switch-to-sign-in' ? 'switch-to-sign-in' : null);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -34,6 +47,8 @@ export function SignUpForm({ onSwitchToSignIn }: { onSwitchToSignIn?: () => void
     if (!isLoaded) return;
 
     try {
+      setIsVerifying(true);
+      setErrorText(null);
       const signUpAttempt = await signUp.attemptEmailAddressVerification({
         code,
       });
@@ -52,9 +67,14 @@ export function SignUpForm({ onSwitchToSignIn }: { onSwitchToSignIn?: () => void
         });
       } else {
         console.error(JSON.stringify(signUpAttempt, null, 2));
+        setErrorText('לא הצלחנו לאמת את הקוד. נסה שוב.');
       }
     } catch (err) {
       console.error(JSON.stringify(err, null, 2));
+      const ui = toAuthUiError(err);
+      setErrorText(ui.message);
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -64,6 +84,7 @@ export function SignUpForm({ onSwitchToSignIn }: { onSwitchToSignIn?: () => void
   const primary = useThemeColor({}, 'primary');
   const primaryText = useThemeColor({}, 'primaryText');
   const muted = useThemeColor({}, 'mutedText');
+  const border = useThemeColor({}, 'border');
 
   if (pendingVerification) {
     return (
@@ -79,14 +100,23 @@ export function SignUpForm({ onSwitchToSignIn }: { onSwitchToSignIn?: () => void
           value={code}
           placeholder="Enter your verification code"
           placeholderTextColor="#666666"
-          onChangeText={setCode}
+          onChangeText={(v) => {
+            setCode(v);
+            setErrorText(null);
+          }}
           keyboardType="numeric"
         />
+        {errorText ? <ThemedText style={[styles.error, { borderColor: border }]}>{errorText}</ThemedText> : null}
         <Pressable
           style={({ pressed }) => [styles.button, { backgroundColor: primary }, pressed && styles.buttonPressed]}
           onPress={onVerifyPress}
+          disabled={isVerifying || !code}
         >
-          <ThemedText style={[styles.buttonText, { color: primaryText }]}>Verify</ThemedText>
+          {isVerifying ? (
+            <ActivityIndicator color={primaryText} />
+          ) : (
+            <ThemedText style={[styles.buttonText, { color: primaryText }]}>Verify</ThemedText>
+          )}
         </Pressable>
       </View>
     );
@@ -105,7 +135,11 @@ export function SignUpForm({ onSwitchToSignIn }: { onSwitchToSignIn?: () => void
         value={emailAddress}
         placeholder="Enter email"
         placeholderTextColor="#666666"
-        onChangeText={setEmailAddress}
+        onChangeText={(v) => {
+          setEmailAddress(v);
+          setErrorText(null);
+          setPendingAction(null);
+        }}
         keyboardType="email-address"
       />
 
@@ -116,8 +150,19 @@ export function SignUpForm({ onSwitchToSignIn }: { onSwitchToSignIn?: () => void
         placeholder="Enter password"
         placeholderTextColor="#666666"
         secureTextEntry={true}
-        onChangeText={setPassword}
+        onChangeText={(v) => {
+          setPassword(v);
+          setErrorText(null);
+          setPendingAction(null);
+        }}
       />
+
+      {errorText ? <ThemedText style={[styles.error, { borderColor: border }]}>{errorText}</ThemedText> : null}
+      {pendingAction === 'switch-to-sign-in' && onSwitchToSignIn ? (
+        <Pressable onPress={onSwitchToSignIn}>
+          <ThemedText type="link">לעבור להתחברות</ThemedText>
+        </Pressable>
+      ) : null}
 
       <Pressable
         style={({ pressed }) => [
@@ -127,9 +172,13 @@ export function SignUpForm({ onSwitchToSignIn }: { onSwitchToSignIn?: () => void
           pressed && styles.buttonPressed,
         ]}
         onPress={onSignUpPress}
-        disabled={!emailAddress || !password}
+        disabled={!emailAddress || !password || isSubmitting}
       >
-        <ThemedText style={[styles.buttonText, { color: primaryText }]}>Continue</ThemedText>
+        {isSubmitting ? (
+          <ActivityIndicator color={primaryText} />
+        ) : (
+          <ThemedText style={[styles.buttonText, { color: primaryText }]}>Continue</ThemedText>
+        )}
       </Pressable>
 
       <View style={styles.linkContainer}>
@@ -197,6 +246,13 @@ const styles = StyleSheet.create({
     gap: 4,
     marginTop: 12,
     alignItems: 'center',
+  },
+  error: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderRadius: 10,
+    opacity: 0.95,
   },
 });
 
