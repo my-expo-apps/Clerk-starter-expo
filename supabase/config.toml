@@ -4,3 +4,6 @@ verify_jwt = false
 [functions.bootstrap-system]
 verify_jwt = false
 
+[functions.bootstrap-status]
+verify_jwt = false
+

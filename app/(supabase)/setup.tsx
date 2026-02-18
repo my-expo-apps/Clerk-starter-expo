@@ -30,6 +30,7 @@ export default function Page() {
   const [validatedOnce, setValidatedOnce] = React.useState(false);
   const [logsModalOpen, setLogsModalOpen] = React.useState(false);
   const [logs, setLogs] = React.useState<ValidationLogEntry[]>([]);
+  const [checks, setChecks] = React.useState<null | Record<string, any>>(null);
   const [stepOverride, setStepOverride] = React.useState<WizardStep | null>(null);
 
   const [supabaseUrl, setSupabaseUrl] = React.useState('');
@@ -113,6 +114,7 @@ export default function Page() {
     setBusy(true);
     setStatus(null);
     setLogs([]);
+    setChecks(null);
     try {
       const v = validateInputs();
       if (!v.ok) {
@@ -132,6 +134,7 @@ export default function Page() {
       });
       setValidatedOnce(true);
       setStepOverride(null);
+      setChecks(res.checks ?? null);
 
       if (res.connection && res.schemaReady && res.rpcInstalled && res.bridgeReady) {
         setStatus('✅ Ready.');
@@ -245,6 +248,17 @@ export default function Page() {
 
   const canPrimary = inputsOk && !busy;
 
+  const StatusRow = ({ label, ok, detail }: { label: string; ok: boolean; detail?: string }) => {
+    return (
+      <View style={styles.statusRow}>
+        <ThemedText style={styles.statusRowText}>
+          {ok ? '✅' : '❌'} {label}
+        </ThemedText>
+        {detail ? <ThemedText style={styles.statusRowDetail}>{detail}</ThemedText> : null}
+      </View>
+    );
+  };
+
   return (
     <ThemedView style={styles.container}>
       <SetupCard>
@@ -321,6 +335,27 @@ export default function Page() {
                 <ThemedText style={styles.badgeText}>Bridge</ThemedText>
               </View>
             </View>
+
+            {checks ? (
+              <View style={styles.statusBlock}>
+                <StatusRow label="Supabase host" ok={checks.host?.ok === true} detail={checks.host?.ms ? `${checks.host.ms}ms` : undefined} />
+                <StatusRow
+                  label="Edge: clerk-jwt-verify"
+                  ok={checks.edgeClerkVerify?.ok === true}
+                  detail={checks.edgeClerkVerify?.ms ? `${checks.edgeClerkVerify.ms}ms` : undefined}
+                />
+                <StatusRow
+                  label="Edge: bootstrap-status (RPC)"
+                  ok={checks.rpcStatus?.ok === true}
+                  detail={checks.rpcStatus?.ms ? `${checks.rpcStatus.ms}ms` : undefined}
+                />
+                <StatusRow
+                  label="Minted Supabase JWT"
+                  ok={checks.supabaseJwt?.ok === true}
+                  detail={checks.supabaseJwt?.ms ? `${checks.supabaseJwt.ms}ms` : undefined}
+                />
+              </View>
+            ) : null}
 
             <Pressable style={[styles.primaryButton, !canPrimary && styles.buttonDisabled]} onPress={primary.onPress} disabled={!canPrimary}>
               {busy ? <ActivityIndicator /> : <ThemedText style={styles.primaryButtonText}>{primary.label}</ThemedText>}
@@ -438,6 +473,20 @@ const styles = StyleSheet.create({
   badgeOk: { backgroundColor: 'rgba(46, 204, 113, 0.15)' },
   badgeBad: { backgroundColor: 'rgba(231, 76, 60, 0.15)' },
   badgeText: { fontWeight: '700' },
+  statusBlock: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 12,
+    padding: 10,
+    gap: 8,
+  },
+  statusRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  statusRowText: { fontWeight: '800', opacity: 0.95 },
+  statusRowDetail: { opacity: 0.75 },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.55)',
