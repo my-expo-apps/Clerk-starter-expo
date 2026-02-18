@@ -1,5 +1,8 @@
 # Secure Runtime Expo + Clerk + Supabase Foundation
 
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](#)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+
 A **production-oriented** Expo foundation for Clerk authentication + Supabase data isolation with a secure, clone-ready pattern:
 **runtime secrets** (no `.env` in the app), deterministic identity mapping, stateless JWT federation, and RLS-enforced multi-tenant isolation.
 
