@@ -1,4 +1,4 @@
-﻿# Clerk Starter Expo ג€” SaaS Foundation Evolution (v1.1.0)
+﻿# Clerk Starter Expo  SaaS Foundation Evolution (v1.1.0)
 
 Production-ready reference repo that shows how to evolve an Expo + Clerk starter into a full SaaS auth/data foundation.
 
