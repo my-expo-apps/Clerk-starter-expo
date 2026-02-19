@@ -73,17 +73,54 @@ function classify(res: { ok: boolean; status?: number; error?: string }) {
   return { kind: 'unknown' as const };
 }
 
-export async function testHost(params: { supabaseUrl: string; onLog?: LogFn }) {
+export async function testHost(params: { supabaseUrl: string; supabaseAnonKey: string; onLog?: LogFn }) {
   const url = `${trimSlash(params.supabaseUrl)}/auth/v1/health`;
   log(params.onLog, 'info', 'Testing Supabase host…');
-  const res = await fetchJsonWithTimeout<any>(url, { method: 'GET' });
-  return {
-    ok: res.ok,
-    ms: res.ms,
-    status: res.ok ? res.status : res.status,
-    error: res.ok ? undefined : res.error,
-    ...classify({ ok: res.ok, status: res.ok ? res.status : res.status, error: res.ok ? undefined : res.error }),
-  };
+
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: {
+        apikey: params.supabaseAnonKey,
+      },
+    });
+
+    const durationMs = Date.now() - startedAt;
+    const status = res.status;
+
+    // 401 means host is alive but unauthorized, not unreachable.
+    // In general, any 2xx–4xx response indicates the host is reachable.
+    const reachable = status < 500;
+
+    return {
+      ok: reachable,
+      // Keep compatibility with existing consumers that read `ms`.
+      ms: durationMs,
+      durationMs,
+      status,
+      error: reachable ? undefined : `HTTP ${status}`,
+      ...classify({ ok: reachable, status, error: reachable ? undefined : `HTTP ${status}` }),
+    };
+  } catch (e) {
+    const durationMs = Date.now() - startedAt;
+    const name = (e as Error)?.name;
+    const error = name === 'AbortError' ? 'timeout' : (e as Error).message;
+    return {
+      ok: false,
+      ms: durationMs,
+      durationMs,
+      status: undefined,
+      error,
+      ...classify({ ok: false, status: undefined, error }),
+    };
+  } finally {
+    clearTimeout(id);
+  }
 }
 
 export async function testEdgeFunction(params: {
@@ -149,7 +186,7 @@ export async function runDiagnostics(params: {
   clerkToken?: string | null;
   onLog?: LogFn;
 }): Promise<DiagnosticResult> {
-  const host = await testHost({ supabaseUrl: params.supabaseUrl, onLog: params.onLog });
+  const host = await testHost({ supabaseUrl: params.supabaseUrl, supabaseAnonKey: params.supabaseAnonKey, onLog: params.onLog });
 
   const edgeClerkVerify = params.clerkToken
     ? await testEdgeFunction({
