@@ -2,35 +2,74 @@ import { SetupCard } from '@/components/setup/setup-card';
 import { Stepper, type StepperStep } from '@/components/setup/stepper';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { useSystemStatus } from '@/context/SystemStatusContext';
 import { clearRuntimeConfig, getRuntimeConfig, setRuntimeConfig, type RuntimeConfig } from '@/lib/runtime-config';
 import { type ValidationLogEntry } from '@/services/connection-validator';
 import * as Clipboard from 'expo-clipboard';
 import { useRouter } from 'expo-router';
 import * as React from 'react';
-import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Modal, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 
 const migrationPath = 'supabase/migrations/001_init.sql';
 
 type WizardStep = 0 | 1 | 2 | 3;
 
-function nextIncompleteStep(system: ReturnType<typeof useSystemStatus>): WizardStep {
-  if (!system.supabaseConnected) return 0;
-  if (!system.schemaReady || !system.rpcInstalled) return 1;
-  if (!system.bridgeAuthorized) return 2;
+type CliStatusResponse =
+  | { cliAvailable: false }
+  | {
+      cliAvailable: true;
+      devOnly: true;
+      supabase: {
+        status: { ok: boolean; durationMs: number; exitCode?: number };
+        functions: {
+          ok: boolean;
+          durationMs: number;
+          exitCode?: number;
+          requiredFunctions: string[];
+          functionsPresent: boolean;
+          detected: string[];
+        };
+      };
+      clerk: { status: { ok: boolean; durationMs: number; exitCode?: number } };
+      output?: Record<string, any>;
+    };
+
+function nextIncompleteStepFromCli(cli: CliStatusResponse | null): WizardStep {
+  const cliOk = cli?.cliAvailable === true;
+  const supabaseOk = cliOk && (cli as any).supabase?.status?.ok === true;
+  const functionsOk = supabaseOk && (cli as any).supabase?.functions?.functionsPresent === true;
+  const clerkOk = cliOk && (cli as any).clerk?.status?.ok === true;
+
+  if (!cliOk) return 0;
+  if (!supabaseOk) return 1;
+  if (!functionsOk || !clerkOk) return 2;
   return 3;
+}
+
+async function fetchCliStatus(timeoutMs: number): Promise<CliStatusResponse> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch('/api/cli-status', {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    });
+    const json = (await res.json()) as CliStatusResponse;
+    return json;
+  } finally {
+    clearTimeout(id);
+  }
 }
 
 export default function Page() {
   const router = useRouter();
-  const system = useSystemStatus();
 
   const [status, setStatus] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [validatedOnce, setValidatedOnce] = React.useState(false);
   const [logsModalOpen, setLogsModalOpen] = React.useState(false);
   const [logs, setLogs] = React.useState<ValidationLogEntry[]>([]);
-  const [checks, setChecks] = React.useState<null | Record<string, any>>(null);
+  const [checks, setChecks] = React.useState<CliStatusResponse | null>(null);
   const [stepOverride, setStepOverride] = React.useState<WizardStep | null>(null);
 
   const [supabaseUrl, setSupabaseUrl] = React.useState('');
@@ -87,7 +126,6 @@ export default function Page() {
         clerk_publishable_key: v.clerkPk,
       };
       await setRuntimeConfig(cfg);
-      await system.reloadConfiguredFlag();
       setStatus('Saved.');
     } catch (e) {
       setStatus(`Save failed: ${(e as Error).message}`);
@@ -101,7 +139,6 @@ export default function Page() {
     setStatus(null);
     try {
       await clearRuntimeConfig();
-      await system.reloadConfiguredFlag();
       setStatus('Cleared.');
     } catch (e) {
       setStatus(`Clear failed: ${(e as Error).message}`);
@@ -127,33 +164,53 @@ export default function Page() {
         supabase_anon_key: v.anon,
         clerk_publishable_key: v.clerkPk,
       });
-      await system.reloadConfiguredFlag();
 
-      const res = await system.refresh({
-        onLog: (entry) => setLogs((l) => [...l, entry]),
-      });
+      const pushLog = (level: ValidationLogEntry['level'], message: string) =>
+        setLogs((l) => [...l, { ts: Date.now(), level, message }]);
+
+      if (!__DEV__) {
+        pushLog('warn', 'CLI status route is dev-only.');
+        setValidatedOnce(true);
+        setStatus('CLI status is available only in development.');
+        setChecks({ cliAvailable: false });
+        return;
+      }
+
+      if (Platform.OS !== 'web') {
+        // This route runs on the local Node runtime backing the web dev server.
+        pushLog('warn', 'CLI status is only available on Web dev server.');
+        setValidatedOnce(true);
+        setStatus('CLI status is available only on Web (development).');
+        setChecks({ cliAvailable: false });
+        return;
+      }
+
+      pushLog('info', 'Fetching local CLI status…');
+      const cli = await fetchCliStatus(4500);
       setValidatedOnce(true);
       setStepOverride(null);
-      setChecks(res.checks ?? null);
+      setChecks(cli);
 
-      if (res.connection && res.schemaReady && res.rpcInstalled && res.bridgeReady) {
-        setStatus('✅ Ready.');
+      if (cli.cliAvailable !== true) {
+        pushLog('error', 'CLI not available.');
+        setStatus('CLI not available. Install Supabase CLI and Clerk CLI.');
         return;
       }
 
-      if (!res.connection) {
-        setStatus(res.errorMessage ?? 'Supabase connection failed.');
-        return;
+      const supabaseOk = cli.supabase.status.ok;
+      const functionsPresent = cli.supabase.functions.functionsPresent;
+      const clerkOk = cli.clerk.status.ok;
+
+      pushLog('info', `supabase status: ${supabaseOk ? 'OK' : 'FAIL'}`);
+      pushLog('info', `supabase functions list: ${cli.supabase.functions.ok ? 'OK' : 'FAIL'}`);
+      pushLog('info', `required functions present: ${functionsPresent ? 'YES' : 'NO'}`);
+      pushLog('info', `clerk status: ${clerkOk ? 'OK' : 'FAIL'}`);
+
+      if (supabaseOk && functionsPresent && clerkOk) {
+        setStatus('✅ CLI foundation ready.');
+      } else {
+        setStatus('CLI foundation not ready. Run: npm run setup-project');
       }
-      if (!res.schemaReady) {
-        setStatus('Schema missing. Install.');
-        return;
-      }
-      if (!res.rpcInstalled) {
-        setStatus(res.errorMessage ?? 'Bootstrap RPC missing. Run: supabase db push');
-        return;
-      }
-      setStatus(res.errorMessage ?? 'Bridge not authorized.');
     } catch (e) {
       setStatus(`Validation error: ${(e as Error).message}`);
     } finally {
@@ -167,19 +224,23 @@ export default function Page() {
   };
 
   const stepIsComplete = (step: WizardStep) => {
+    const cliOk = checks?.cliAvailable === true;
+    const supabaseOk = cliOk && (checks as any).supabase?.status?.ok === true;
+    const functionsOk = supabaseOk && (checks as any).supabase?.functions?.functionsPresent === true;
+    const clerkOk = cliOk && (checks as any).clerk?.status?.ok === true;
     switch (step) {
       case 0:
-        return system.supabaseConnected;
+        return cliOk;
       case 1:
-        return system.schemaReady && system.rpcInstalled;
+        return supabaseOk;
       case 2:
-        return system.bridgeAuthorized;
+        return functionsOk && clerkOk;
       case 3:
-        return system.supabaseConnected && system.schemaReady && system.rpcInstalled && system.bridgeAuthorized;
+        return cliOk && supabaseOk && functionsOk && clerkOk;
     }
   };
 
-  const activeStep = stepOverride ?? nextIncompleteStep(system);
+  const activeStep = stepOverride ?? nextIncompleteStepFromCli(checks);
 
   const steps: StepperStep[] = [
     { key: 'connect', label: 'Connect', state: stepIsComplete(0) ? 'done' : activeStep === 0 ? 'active' : 'todo' },
@@ -188,7 +249,7 @@ export default function Page() {
     { key: 'ready', label: 'Ready', state: stepIsComplete(3) ? 'done' : activeStep === 3 ? 'active' : 'todo' },
   ];
 
-  const maxAccessible = nextIncompleteStep(system);
+  const maxAccessible = nextIncompleteStepFromCli(checks);
   const canNavigateToStep = (idx: number) => idx <= maxAccessible;
 
   const primaryAction = () => {
@@ -272,7 +333,7 @@ export default function Page() {
 
         {activeStep === 2 ? (
           <View style={styles.step}>
-            <ThemedText style={styles.note}>Authorize Clerk → Supabase bridge (sign in first).</ThemedText>
+            <ThemedText style={styles.note}>Validate required Edge Functions and Clerk CLI.</ThemedText>
             <Pressable style={[styles.primaryButton, !canPrimary && styles.buttonDisabled]} onPress={primary.onPress} disabled={!canPrimary}>
               {busy ? <ActivityIndicator /> : <ThemedText style={styles.primaryButtonText}>{primary.label}</ThemedText>}
             </Pressable>
@@ -282,37 +343,40 @@ export default function Page() {
         {activeStep === 3 ? (
           <View style={styles.step}>
             <View style={styles.badges}>
-              <View style={[styles.badge, system.supabaseConnected ? styles.badgeOk : styles.badgeBad]}>
+              <View style={[styles.badge, stepIsComplete(0) ? styles.badgeOk : styles.badgeBad]}>
+                <ThemedText style={styles.badgeText}>CLI</ThemedText>
+              </View>
+              <View style={[styles.badge, stepIsComplete(1) ? styles.badgeOk : styles.badgeBad]}>
                 <ThemedText style={styles.badgeText}>Supabase</ThemedText>
               </View>
-              <View style={[styles.badge, system.schemaReady ? styles.badgeOk : styles.badgeBad]}>
-                <ThemedText style={styles.badgeText}>Schema</ThemedText>
+              <View style={[styles.badge, stepIsComplete(2) ? styles.badgeOk : styles.badgeBad]}>
+                <ThemedText style={styles.badgeText}>Functions</ThemedText>
               </View>
-              <View style={[styles.badge, system.rpcInstalled ? styles.badgeOk : styles.badgeBad]}>
-                <ThemedText style={styles.badgeText}>RPC</ThemedText>
-              </View>
-              <View style={[styles.badge, system.bridgeAuthorized ? styles.badgeOk : styles.badgeBad]}>
-                <ThemedText style={styles.badgeText}>Bridge</ThemedText>
+              <View style={[styles.badge, checks?.cliAvailable === true && (checks as any).clerk?.status?.ok === true ? styles.badgeOk : styles.badgeBad]}>
+                <ThemedText style={styles.badgeText}>Clerk</ThemedText>
               </View>
             </View>
 
-            {checks ? (
+            {checks && checks.cliAvailable === true ? (
               <View style={styles.statusBlock}>
-                <StatusRow label="Supabase host" ok={checks.host?.ok === true} detail={checks.host?.ms ? `${checks.host.ms}ms` : undefined} />
                 <StatusRow
-                  label="Edge: clerk-jwt-verify"
-                  ok={checks.edgeClerkVerify?.ok === true}
-                  detail={checks.edgeClerkVerify?.ms ? `${checks.edgeClerkVerify.ms}ms` : undefined}
+                  label="supabase status"
+                  ok={(checks as any).supabase?.status?.ok === true}
+                  detail={(checks as any).supabase?.status?.durationMs ? `${(checks as any).supabase.status.durationMs}ms` : undefined}
                 />
                 <StatusRow
-                  label="Edge: bootstrap-status (RPC)"
-                  ok={checks.rpcStatus?.ok === true}
-                  detail={checks.rpcStatus?.ms ? `${checks.rpcStatus.ms}ms` : undefined}
+                  label="supabase functions list"
+                  ok={(checks as any).supabase?.functions?.ok === true}
+                  detail={(checks as any).supabase?.functions?.durationMs ? `${(checks as any).supabase.functions.durationMs}ms` : undefined}
                 />
                 <StatusRow
-                  label="Minted Supabase JWT"
-                  ok={checks.supabaseJwt?.ok === true}
-                  detail={checks.supabaseJwt?.ms ? `${checks.supabaseJwt.ms}ms` : undefined}
+                  label="required functions present"
+                  ok={(checks as any).supabase?.functions?.functionsPresent === true}
+                />
+                <StatusRow
+                  label="clerk status"
+                  ok={(checks as any).clerk?.status?.ok === true}
+                  detail={(checks as any).clerk?.status?.durationMs ? `${(checks as any).clerk.status.durationMs}ms` : undefined}
                 />
               </View>
             ) : null}
@@ -335,7 +399,6 @@ export default function Page() {
           </Pressable>
         </View>
 
-        {validatedOnce && system.lastError ? <ThemedText style={styles.status}>{system.lastError}</ThemedText> : null}
         {status ? <ThemedText style={styles.status}>{status}</ThemedText> : null}
       </SetupCard>
 
