@@ -54,8 +54,13 @@ async function fetchCliStatus(timeoutMs: number): Promise<CliStatusResponse> {
       headers: { accept: 'application/json' },
       signal: controller.signal,
     });
-    const json = (await res.json()) as CliStatusResponse;
-    return json;
+    const text = await res.text();
+    try {
+      return JSON.parse(text) as CliStatusResponse;
+    } catch {
+      // If we got HTML, the API route likely isn't active (wrong file naming / not running on web dev server).
+      return { cliAvailable: false };
+    }
   } finally {
     clearTimeout(id);
   }

@@ -1,5 +1,7 @@
-// Dev-only API route: exposes local CLI status for CLI-first provisioning.
-// This runs on the local Node runtime (web dev server). It must never execute in production builds.
+// Dev-only API route for CLI-first provisioning checks.
+// Expo Router API routes use the `+api.ts` convention (not Next.js `route.ts`).
+//
+// This runs only on the local dev server (web). It must never execute in production builds.
 
 type CmdResult = {
   ok: boolean;
@@ -59,7 +61,7 @@ async function run(cmd: string, timeoutMs: number): Promise<CmdResult> {
     const code = err?.code;
     const signal = err?.signal;
 
-    const missingCli = code === 'ENOENT' || typeof err?.message === 'string' && err.message.toLowerCase().includes('not recognized');
+    const missingCli = code === 'ENOENT' || (typeof err?.message === 'string' && err.message.toLowerCase().includes('not recognized'));
     const timedOut = code === 'ETIMEDOUT' || signal === 'SIGTERM' || String(err?.message ?? '').toLowerCase().includes('timed out');
 
     return {
@@ -81,11 +83,10 @@ function parseSupabaseFunctionsList(stdout: string) {
     .map((l) => l.trim())
     .filter(Boolean);
 
-  // Very defensive parsing: just collect any token-ish segments that look like function names.
+  // Very defensive parsing: just collect token-ish segments that look like function names.
   // We never rely on exact CLI formatting.
   const names = new Set<string>();
   for (const line of lines) {
-    // Match common "name  ...  status" table output; take the first column-ish chunk.
     const m = line.match(/^([a-z0-9][a-z0-9_-]{2,})\b/i);
     if (m) names.add(m[1]);
   }
@@ -94,10 +95,10 @@ function parseSupabaseFunctionsList(stdout: string) {
 
 export async function GET() {
   if (!isDevOnly()) {
-    return Response.json({ cliAvailable: false, devOnly: true }, { status: 404 });
+    return Response.json({ cliAvailable: false, devOnly: true }, { status: 404, headers: { 'cache-control': 'no-store' } });
   }
 
-  // Run with tight timeouts; this is a UI helper, not a provisioning runner.
+  // Tight timeouts; this is a UI helper, not a provisioning runner.
   const timeoutMs = 4000;
 
   const supabaseStatus = await run('supabase status', timeoutMs);
@@ -108,14 +109,14 @@ export async function GET() {
   const clerkInstalled = !clerkStatus.missingCli;
   const cliAvailable = supabaseInstalled && clerkInstalled;
 
+  if (!cliAvailable) {
+    return Response.json({ cliAvailable: false }, { headers: { 'cache-control': 'no-store' } });
+  }
+
   // Required functions for this repo.
   const functionNames = supabaseFunctions.ok ? parseSupabaseFunctionsList(supabaseFunctions.stdout ?? '') : [];
   const requiredFunctions = ['clerk-jwt-verify', 'bootstrap-system', 'bootstrap-status'];
   const functionsPresent = requiredFunctions.every((n) => functionNames.includes(n));
-
-  if (!cliAvailable) {
-    return Response.json({ cliAvailable: false }, { headers: { 'cache-control': 'no-store' } });
-  }
 
   return Response.json(
     {
